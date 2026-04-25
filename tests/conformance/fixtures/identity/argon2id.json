@@ -1,0 +1,38 @@
+{
+  "$schema": "../../fixture.schema.json",
+  "spec_version": "0.1.0",
+  "capability": "identity",
+  "operation": "verify_password",
+  "conformance_level": "MUST",
+  "spec_section": "docs/identity.md#hashing-requirements",
+  "description": "Argon2id PHC verification — the cross-language interop test for password hashing. The fixture hash was generated with the spec floor parameters (m=19456, t=2, p=1) using argon2-cffi-derived libsodium-compatible Argon2id; any conforming verifier MUST accept it for the matching plaintext and reject it for any other.",
+  "tests": [
+    {
+      "id": "argon2id.verify.matches-correct-password",
+      "description": "Verifying the fixture PHC hash against the original plaintext password MUST return true. This is THE cross-SDK Argon2id parity test — both Node and PHP MUST verify the same hash to the same plaintext.",
+      "input": {
+        "phc_hash": "$argon2id$v=19$m=19456,t=2,p=1$779z4UHkLWR4w0TEo9gcHg$Gz0+nGnpokhsKi1cPlx8i74FBN1Nq0OURZ3xso1AHMU",
+        "candidate_password": "correcthorsebatterystaple"
+      },
+      "expected": { "result": true }
+    },
+    {
+      "id": "argon2id.verify.rejects-wrong-password",
+      "description": "Verifying the fixture PHC hash against a different plaintext MUST return false. Constant-time comparison; no fallback.",
+      "input": {
+        "phc_hash": "$argon2id$v=19$m=19456,t=2,p=1$779z4UHkLWR4w0TEo9gcHg$Gz0+nGnpokhsKi1cPlx8i74FBN1Nq0OURZ3xso1AHMU",
+        "candidate_password": "wrong-password"
+      },
+      "expected": { "result": false }
+    },
+    {
+      "id": "argon2id.verify.rejects-empty-password",
+      "description": "An empty candidate password verifies as false.",
+      "input": {
+        "phc_hash": "$argon2id$v=19$m=19456,t=2,p=1$779z4UHkLWR4w0TEo9gcHg$Gz0+nGnpokhsKi1cPlx8i74FBN1Nq0OURZ3xso1AHMU",
+        "candidate_password": ""
+      },
+      "expected": { "result": false }
+    }
+  ]
+}
