@@ -101,6 +101,99 @@ class RecoveryFactor:
 Factor = TotpFactor | WebAuthnFactor | RecoveryFactor
 
 
+# ─── Store-level MFA result + proof types (v0.2 store ops) ──────
+
+
+@dataclass(frozen=True)
+class TotpEnrollmentResult:
+    """Returned by ``IdentityStore.enroll_totp_factor``.
+
+    The ``factor`` is the public record (status='pending' until
+    confirm). The ``secret_b32`` and ``otpauth_uri`` are returned ONCE
+    so the host can render the QR code; the SDK stores the raw secret
+    internally and never re-emits it.
+    """
+
+    factor: TotpFactor
+    secret_b32: str
+    otpauth_uri: str
+
+
+@dataclass(frozen=True)
+class WebAuthnEnrollmentResult:
+    """Returned by ``IdentityStore.enroll_webauthn_factor``.
+
+    The factor is created in 'pending' status with the caller-supplied
+    public key and counter. Confirmation comes from a successful
+    ``confirm_webauthn_factor`` against an assertion produced by the
+    same authenticator.
+    """
+
+    factor: WebAuthnFactor
+
+
+@dataclass(frozen=True)
+class RecoveryEnrollmentResult:
+    """Returned by ``IdentityStore.enroll_recovery_factor``.
+
+    The factor is active immediately. ``codes`` is the plaintext set
+    returned ONCE — the SDK stores only Argon2id hashes.
+    """
+
+    factor: RecoveryFactor
+    codes: list[str]
+
+
+@dataclass(frozen=True)
+class TotpProof:
+    code: str
+
+
+@dataclass(frozen=True)
+class WebAuthnProof:
+    """Inputs for verifying a WebAuthn assertion against a stored factor.
+
+    ``credential_id`` matches the ``identifier`` field on the WebAuthn
+    factor (base64url-encoded WebAuthn credential ID). The SDK looks
+    up the factor by this id, then runs the assertion against the
+    stored COSE public key.
+
+    ``expected_challenge`` is the raw bytes of the challenge the
+    application issued for this assertion attempt; the SDK never stores
+    or generates it — challenge issuance is the host's responsibility.
+    """
+
+    credential_id: str
+    authenticator_data: bytes
+    client_data_json: bytes
+    signature: bytes
+    expected_challenge: bytes
+    expected_origin: str
+
+
+@dataclass(frozen=True)
+class RecoveryProof:
+    code: str
+
+
+MfaProof = TotpProof | WebAuthnProof | RecoveryProof
+
+
+@dataclass(frozen=True)
+class MfaVerifyResult:
+    """Successful ``IdentityStore.verify_mfa`` outcome.
+
+    The new sign count is set only for WebAuthn proofs.
+    ``mfa_verified_at`` is the timestamp the SDK stamps on the session
+    (per ADR 0008 ``ses.mfa_verified_at``).
+    """
+
+    mfa_id: str
+    type: FactorType
+    mfa_verified_at: datetime
+    new_sign_count: int | None = None
+
+
 # ─── User MFA policy ─────────────────────────────────────────────
 
 

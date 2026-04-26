@@ -34,6 +34,29 @@ from .errors import (
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
+from .mfa import (
+    Factor,
+    FactorStatus,
+    FactorType,
+    MfaProof,
+    MfaVerifyResult,
+    RecoveryEnrollmentResult,
+    RecoveryFactor,
+    RecoveryProof,
+    TotpEnrollmentResult,
+    TotpFactor,
+    TotpProof,
+    UserMfaPolicy,
+    WebAuthnEnrollmentResult,
+    WebAuthnFactor,
+    WebAuthnProof,
+    generate_recovery_codes,
+    generate_totp_secret,
+    is_valid_recovery_code,
+    normalize_recovery_input,
+    totp_otpauth_uri,
+    totp_verify,
+)
 from .types import (
     Credential,
     CredentialType,
@@ -46,6 +69,10 @@ from .types import (
     Status,
     User,
     VerifiedCredential,
+)
+from .webauthn import (
+    WebAuthnError,
+    webauthn_verify_assertion,
 )
 
 
@@ -70,6 +97,17 @@ class InMemoryIdentityStore:
         self._sessions: dict[str, Session] = {}
         self._session_token_hashes: dict[str, str] = {}  # ses_id → token-hash
         self._session_by_token_hash: dict[str, str] = {}  # token-hash → ses_id
+        # ─── v0.2 MFA (ADR 0008) ───
+        self._mfa_factors: dict[str, "Factor"] = {}
+        self._mfa_totp_secrets: dict[str, bytes] = {}  # mfa_id → raw secret
+        self._mfa_webauthn_keys: dict[str, bytes] = {}  # mfa_id → COSE pubkey
+        self._mfa_recovery_hashes: dict[str, list[str]] = {}  # mfa_id → 10 PHC
+        self._mfa_recovery_consumed: dict[str, list[bool]] = {}  # parallel array
+        # mfa_id by (usr_id, type) — only for singleton types (totp, recovery)
+        self._mfa_active_singleton: dict[str, str] = {}
+        # mfa_id by webauthn credential_id (active factors only)
+        self._mfa_webauthn_by_credential_id: dict[str, str] = {}
+        self._mfa_policies: dict[str, "UserMfaPolicy"] = {}
         self._clock = clock or _default_clock
 
     # ─── Internal helpers ───
@@ -627,3 +665,455 @@ class InMemoryIdentityStore:
         if old_hash is not None:
             self._session_by_token_hash.pop(old_hash, None)
         return updated
+
+    # ─── v0.2 MFA store operations (ADR 0008) ──────────────────────
+
+    # Two-step enrollment for TOTP and WebAuthn (ADR 0008 §"Two-step
+    # enrollment"); recovery codes are single-step. Pending factors
+    # expire after this window if not confirmed; expired-pending
+    # confirmations are rejected. Audit M1: this is the only spot in
+    # the SDK that enforces the expiry — the schema CHECK ensures
+    # consistency at the row level but doesn't auto-revoke.
+    PENDING_FACTOR_TTL_SECONDS = 600  # 10 minutes per ADR 0008.
+
+    def _require_factor(self, mfa_id: str) -> Factor:
+        factor = self._mfa_factors.get(mfa_id)
+        if factor is None:
+            raise NotFoundError(f"MFA factor {mfa_id} not found")
+        return factor
+
+    def _check_user_active(self, usr_id: str) -> None:
+        user = self._require_user(usr_id)
+        if user.status != Status.ACTIVE:
+            raise PreconditionError(
+                f"User {usr_id} is {user.status.value}; cannot enroll MFA",
+                reason="user_not_active",
+            )
+
+    def _enforce_no_active_singleton(
+        self, usr_id: str, type_: FactorType
+    ) -> None:
+        # TOTP and Recovery are singletons per usr — at most one active
+        # at a time. WebAuthn allows multiple (phone + laptop + key).
+        if type_ in (FactorType.TOTP, FactorType.RECOVERY):
+            key = f"{usr_id}|{type_.value}"
+            if key in self._mfa_active_singleton:
+                raise PreconditionError(
+                    f"User {usr_id} already has an active {type_.value} factor; "
+                    "revoke before re-enrolling",
+                    reason="active_singleton_exists",
+                )
+
+    def enroll_totp_factor(
+        self, usr_id: str, identifier: str
+    ) -> TotpEnrollmentResult:
+        """Begin TOTP enrollment.
+
+        Generates a fresh secret, stores it on a pending factor, and
+        returns the secret + otpauth URI for QR rendering. Confirmation
+        comes from a successful ``confirm_totp_factor`` against a code
+        the user types from their authenticator app.
+        """
+        self._check_user_active(usr_id)
+        self._enforce_no_active_singleton(usr_id, FactorType.TOTP)
+        now = self._now()
+        secret = generate_totp_secret()
+        mfa_id = generate("mfa")
+        factor = TotpFactor(
+            id=mfa_id,
+            usr_id=usr_id,
+            identifier=identifier,
+            status=FactorStatus.PENDING,
+            replaces=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._mfa_factors[mfa_id] = factor
+        self._mfa_totp_secrets[mfa_id] = secret
+        import base64
+
+        secret_b32 = base64.b32encode(secret).rstrip(b"=").decode("ascii")
+        otpauth_uri = totp_otpauth_uri(
+            secret=secret, label=identifier, issuer="Flametrench"
+        )
+        return TotpEnrollmentResult(
+            factor=factor, secret_b32=secret_b32, otpauth_uri=otpauth_uri
+        )
+
+    def enroll_webauthn_factor(
+        self,
+        usr_id: str,
+        identifier: str,
+        *,
+        public_key: bytes,
+        sign_count: int,
+        rp_id: str,
+        aaguid: str | None = None,
+        transports: list[str] | None = None,
+    ) -> WebAuthnEnrollmentResult:
+        """Begin WebAuthn enrollment.
+
+        Caller passes the COSE public key bytes and sign_count from the
+        registration ceremony (the assertion the browser returned to
+        ``navigator.credentials.create()``). Confirmation comes from a
+        successful ``confirm_webauthn_factor`` against a follow-up
+        assertion from the same authenticator.
+
+        ``identifier`` is the base64url-encoded WebAuthn credential ID;
+        the SDK indexes on it for verifyMfa lookup.
+        """
+        self._check_user_active(usr_id)
+        if identifier in self._mfa_webauthn_by_credential_id:
+            raise PreconditionError(
+                f"WebAuthn credential {identifier!r} is already enrolled",
+                reason="duplicate_webauthn_credential",
+            )
+        now = self._now()
+        mfa_id = generate("mfa")
+        factor = WebAuthnFactor(
+            id=mfa_id,
+            usr_id=usr_id,
+            identifier=identifier,
+            status=FactorStatus.PENDING,
+            replaces=None,
+            rp_id=rp_id,
+            sign_count=sign_count,
+            created_at=now,
+            updated_at=now,
+        )
+        self._mfa_factors[mfa_id] = factor
+        self._mfa_webauthn_keys[mfa_id] = public_key
+        # The credential_id index is set even for pending factors so a
+        # second enrollment of the same credential is rejected
+        # immediately (above), and the verify path can find the factor
+        # after confirmation flips status to active.
+        self._mfa_webauthn_by_credential_id[identifier] = mfa_id
+        return WebAuthnEnrollmentResult(factor=factor)
+
+    def enroll_recovery_factor(self, usr_id: str) -> RecoveryEnrollmentResult:
+        """Mint a fresh set of 10 recovery codes — active immediately.
+
+        Codes are returned ONCE in plaintext; the SDK stores Argon2id
+        hashes only. If the user already has an active recovery set,
+        callers must revoke it first (ADR 0008 — at most one active
+        recovery factor per user).
+        """
+        self._check_user_active(usr_id)
+        self._enforce_no_active_singleton(usr_id, FactorType.RECOVERY)
+        now = self._now()
+        codes = generate_recovery_codes()
+        hashes = [hash_password(code) for code in codes]
+        consumed = [False] * len(codes)
+        mfa_id = generate("mfa")
+        factor = RecoveryFactor(
+            id=mfa_id,
+            usr_id=usr_id,
+            status=FactorStatus.ACTIVE,
+            replaces=None,
+            created_at=now,
+            updated_at=now,
+            remaining=len(codes),
+        )
+        self._mfa_factors[mfa_id] = factor
+        self._mfa_recovery_hashes[mfa_id] = hashes
+        self._mfa_recovery_consumed[mfa_id] = consumed
+        self._mfa_active_singleton[f"{usr_id}|recovery"] = mfa_id
+        return RecoveryEnrollmentResult(factor=factor, codes=codes)
+
+    def get_mfa_factor(self, mfa_id: str) -> Factor:
+        return self._require_factor(mfa_id)
+
+    def list_mfa_factors(self, usr_id: str) -> list[Factor]:
+        return [
+            f for f in self._mfa_factors.values() if f.usr_id == usr_id
+        ]
+
+    def confirm_totp_factor(self, mfa_id: str, code: str) -> TotpFactor:
+        factor = self._require_factor(mfa_id)
+        if not isinstance(factor, TotpFactor):
+            raise CredentialTypeMismatchError(
+                f"Factor {mfa_id} is {factor.type.value}, not totp"
+            )
+        if factor.status != FactorStatus.PENDING:
+            raise PreconditionError(
+                f"Factor {mfa_id} is {factor.status.value}; only pending factors confirm",
+                reason="factor_not_pending",
+            )
+        self._check_pending_not_expired(factor)
+        secret = self._mfa_totp_secrets[mfa_id]
+        if not totp_verify(secret, code, timestamp=int(self._now().timestamp())):
+            raise InvalidCredentialError("TOTP code did not verify")
+        active = TotpFactor(
+            id=factor.id,
+            usr_id=factor.usr_id,
+            identifier=factor.identifier,
+            status=FactorStatus.ACTIVE,
+            replaces=factor.replaces,
+            created_at=factor.created_at,
+            updated_at=self._now(),
+        )
+        self._mfa_factors[mfa_id] = active
+        self._mfa_active_singleton[f"{factor.usr_id}|totp"] = mfa_id
+        return active
+
+    def confirm_webauthn_factor(
+        self,
+        mfa_id: str,
+        *,
+        authenticator_data: bytes,
+        client_data_json: bytes,
+        signature: bytes,
+        expected_challenge: bytes,
+        expected_origin: str,
+    ) -> WebAuthnFactor:
+        factor = self._require_factor(mfa_id)
+        if not isinstance(factor, WebAuthnFactor):
+            raise CredentialTypeMismatchError(
+                f"Factor {mfa_id} is {factor.type.value}, not webauthn"
+            )
+        if factor.status != FactorStatus.PENDING:
+            raise PreconditionError(
+                f"Factor {mfa_id} is {factor.status.value}; only pending factors confirm",
+                reason="factor_not_pending",
+            )
+        self._check_pending_not_expired(factor)
+        # Run the assertion verifier with the stored public key and rp_id.
+        # The verifier raises on signature/origin/challenge/etc. failures;
+        # let those propagate so the host can react with a typed error.
+        result = webauthn_verify_assertion(
+            cose_public_key=self._mfa_webauthn_keys[mfa_id],
+            stored_sign_count=factor.sign_count,
+            stored_rp_id=factor.rp_id,
+            expected_challenge=expected_challenge,
+            expected_origin=expected_origin,
+            authenticator_data=authenticator_data,
+            client_data_json=client_data_json,
+            signature=signature,
+        )
+        active = WebAuthnFactor(
+            id=factor.id,
+            usr_id=factor.usr_id,
+            identifier=factor.identifier,
+            status=FactorStatus.ACTIVE,
+            replaces=factor.replaces,
+            rp_id=factor.rp_id,
+            sign_count=result.new_sign_count,
+            created_at=factor.created_at,
+            updated_at=self._now(),
+        )
+        self._mfa_factors[mfa_id] = active
+        return active
+
+    def revoke_mfa_factor(self, mfa_id: str) -> Factor:
+        factor = self._require_factor(mfa_id)
+        if factor.status == FactorStatus.REVOKED:
+            return factor
+        revoked = self._with_factor_status(factor, FactorStatus.REVOKED)
+        self._mfa_factors[mfa_id] = revoked
+        # Clean up indexes so freed singleton slots are reusable, and
+        # the WebAuthn credential_id is freed for re-enrollment.
+        if isinstance(factor, TotpFactor):
+            self._mfa_active_singleton.pop(f"{factor.usr_id}|totp", None)
+        elif isinstance(factor, RecoveryFactor):
+            self._mfa_active_singleton.pop(f"{factor.usr_id}|recovery", None)
+        elif isinstance(factor, WebAuthnFactor):
+            self._mfa_webauthn_by_credential_id.pop(factor.identifier, None)
+        return revoked
+
+    def verify_mfa(self, usr_id: str, proof: MfaProof) -> MfaVerifyResult:
+        """Verify an MFA proof and return the matched factor's id + type.
+
+        Does NOT mint a session — the spec's three-step session flow is
+        ``verify_password → verify_mfa → create_session``. On a WebAuthn
+        proof the result includes the new sign count, which the caller
+        persists alongside the session decision.
+        """
+        if isinstance(proof, TotpProof):
+            return self._verify_totp(usr_id, proof.code)
+        if isinstance(proof, WebAuthnProof):
+            return self._verify_webauthn(usr_id, proof)
+        if isinstance(proof, RecoveryProof):
+            return self._verify_recovery(usr_id, proof.code)
+        raise TypeError(f"Unknown proof type: {type(proof).__name__}")
+
+    def _verify_totp(self, usr_id: str, code: str) -> MfaVerifyResult:
+        mfa_id = self._mfa_active_singleton.get(f"{usr_id}|totp")
+        if mfa_id is None:
+            raise InvalidCredentialError("No active TOTP factor for user")
+        secret = self._mfa_totp_secrets[mfa_id]
+        if not totp_verify(secret, code, timestamp=int(self._now().timestamp())):
+            raise InvalidCredentialError("TOTP code did not verify")
+        return MfaVerifyResult(
+            mfa_id=mfa_id,
+            type=FactorType.TOTP,
+            mfa_verified_at=self._now(),
+            new_sign_count=None,
+        )
+
+    def _verify_webauthn(
+        self, usr_id: str, proof: WebAuthnProof
+    ) -> MfaVerifyResult:
+        mfa_id = self._mfa_webauthn_by_credential_id.get(proof.credential_id)
+        if mfa_id is None:
+            raise InvalidCredentialError(
+                "No WebAuthn factor for credential id"
+            )
+        factor = self._mfa_factors[mfa_id]
+        if not isinstance(factor, WebAuthnFactor):
+            raise InvalidCredentialError("Factor is not WebAuthn")
+        if factor.usr_id != usr_id:
+            # Don't leak which user owns the credential — generic invalid.
+            raise InvalidCredentialError("WebAuthn factor does not belong to user")
+        if factor.status != FactorStatus.ACTIVE:
+            raise InvalidCredentialError(
+                f"WebAuthn factor is {factor.status.value}, not active"
+            )
+        result = webauthn_verify_assertion(
+            cose_public_key=self._mfa_webauthn_keys[mfa_id],
+            stored_sign_count=factor.sign_count,
+            stored_rp_id=factor.rp_id,
+            expected_challenge=proof.expected_challenge,
+            expected_origin=proof.expected_origin,
+            authenticator_data=proof.authenticator_data,
+            client_data_json=proof.client_data_json,
+            signature=proof.signature,
+        )
+        # Persist the advanced counter atomically with the verify.
+        updated = WebAuthnFactor(
+            id=factor.id,
+            usr_id=factor.usr_id,
+            identifier=factor.identifier,
+            status=factor.status,
+            replaces=factor.replaces,
+            rp_id=factor.rp_id,
+            sign_count=result.new_sign_count,
+            created_at=factor.created_at,
+            updated_at=self._now(),
+        )
+        self._mfa_factors[mfa_id] = updated
+        return MfaVerifyResult(
+            mfa_id=mfa_id,
+            type=FactorType.WEBAUTHN,
+            mfa_verified_at=self._now(),
+            new_sign_count=result.new_sign_count,
+        )
+
+    def _verify_recovery(self, usr_id: str, code: str) -> MfaVerifyResult:
+        mfa_id = self._mfa_active_singleton.get(f"{usr_id}|recovery")
+        if mfa_id is None:
+            raise InvalidCredentialError("No active recovery factor for user")
+        normalized = normalize_recovery_input(code)
+        if not is_valid_recovery_code(normalized):
+            raise InvalidCredentialError("Recovery code is malformed")
+        hashes = self._mfa_recovery_hashes[mfa_id]
+        consumed = self._mfa_recovery_consumed[mfa_id]
+        # Walk every active slot regardless of an early match — keeps the
+        # work constant relative to the active set so timing doesn't leak
+        # which slot matched. We tally the matched slot index and only
+        # use it if no earlier-active slot matched first.
+        matched_slot = -1
+        for i, (h, c) in enumerate(zip(hashes, consumed)):
+            if c:
+                continue
+            if verify_password_hash(h, normalized) and matched_slot == -1:
+                matched_slot = i
+        if matched_slot == -1:
+            raise InvalidCredentialError("Recovery code did not verify")
+        # Consume the matched slot.
+        consumed[matched_slot] = True
+        # Update the public RecoveryFactor's `remaining`.
+        factor = self._mfa_factors[mfa_id]
+        if isinstance(factor, RecoveryFactor):
+            self._mfa_factors[mfa_id] = RecoveryFactor(
+                id=factor.id,
+                usr_id=factor.usr_id,
+                status=factor.status,
+                replaces=factor.replaces,
+                created_at=factor.created_at,
+                updated_at=self._now(),
+                remaining=sum(1 for c in consumed if not c),
+            )
+        return MfaVerifyResult(
+            mfa_id=mfa_id,
+            type=FactorType.RECOVERY,
+            mfa_verified_at=self._now(),
+            new_sign_count=None,
+        )
+
+    # ─── usr_mfa_policy ─────────────────────────────────────────────
+
+    def get_mfa_policy(self, usr_id: str) -> UserMfaPolicy | None:
+        # Existence-check the user, but return None for the absence-of-row
+        # case — the spec is "absent row means MFA not required."
+        self._require_user(usr_id)
+        return self._mfa_policies.get(usr_id)
+
+    def set_mfa_policy(
+        self,
+        usr_id: str,
+        *,
+        required: bool,
+        grace_until: datetime | None = None,
+    ) -> UserMfaPolicy:
+        self._require_user(usr_id)
+        policy = UserMfaPolicy(
+            usr_id=usr_id,
+            required=required,
+            grace_until=grace_until,
+            updated_at=self._now(),
+        )
+        self._mfa_policies[usr_id] = policy
+        return policy
+
+    # ─── private helpers ────────────────────────────────────────────
+
+    def _check_pending_not_expired(self, factor: Factor) -> None:
+        # Pending TOTP/WebAuthn factors expire after PENDING_FACTOR_TTL_SECONDS
+        # past their created_at timestamp. This is the audit M1 enforcement
+        # spot — the schema CHECK constrains row consistency but does not
+        # auto-revoke.
+        if factor.status != FactorStatus.PENDING:
+            return
+        age = (self._now() - factor.created_at).total_seconds()
+        if age > self.PENDING_FACTOR_TTL_SECONDS:
+            raise PreconditionError(
+                f"Pending factor {factor.id} expired "
+                f"({age:.0f}s > {self.PENDING_FACTOR_TTL_SECONDS}s)",
+                reason="pending_factor_expired",
+            )
+
+    def _with_factor_status(self, factor: Factor, status: FactorStatus) -> Factor:
+        now = self._now()
+        if isinstance(factor, TotpFactor):
+            return TotpFactor(
+                id=factor.id,
+                usr_id=factor.usr_id,
+                identifier=factor.identifier,
+                status=status,
+                replaces=factor.replaces,
+                created_at=factor.created_at,
+                updated_at=now,
+            )
+        if isinstance(factor, WebAuthnFactor):
+            return WebAuthnFactor(
+                id=factor.id,
+                usr_id=factor.usr_id,
+                identifier=factor.identifier,
+                status=status,
+                replaces=factor.replaces,
+                rp_id=factor.rp_id,
+                sign_count=factor.sign_count,
+                created_at=factor.created_at,
+                updated_at=now,
+            )
+        if isinstance(factor, RecoveryFactor):
+            return RecoveryFactor(
+                id=factor.id,
+                usr_id=factor.usr_id,
+                status=status,
+                replaces=factor.replaces,
+                created_at=factor.created_at,
+                updated_at=now,
+                remaining=factor.remaining,
+            )
+        raise TypeError(f"Unknown factor type: {type(factor).__name__}")
