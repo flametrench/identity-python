@@ -108,6 +108,9 @@ _WEBAUTHN_ASSERT_SHARED, _WEBAUTHN_ASSERT_TESTS = _load_with_shared(
 _WEBAUTHN_COUNTER_SHARED, _WEBAUTHN_COUNTER_TESTS = _load_with_shared(
     "identity/mfa/webauthn-counter-decrease-rejected.json"
 )
+_WEBAUTHN_ALG_SHARED, _WEBAUTHN_ALG_TESTS = _load_with_shared(
+    "identity/mfa/webauthn-assertion-algorithms.json"
+)
 
 
 @pytest.mark.parametrize(
@@ -125,4 +128,14 @@ def test_webauthn_assertion_conformance(test_case: dict[str, Any]) -> None:
 )
 def test_webauthn_counter_conformance(test_case: dict[str, Any]) -> None:
     actual = _run_webauthn(_WEBAUTHN_COUNTER_SHARED, test_case)
+    assert actual == test_case["expected"]["result"]
+
+
+@pytest.mark.parametrize(
+    "test_case",
+    [pytest.param(t, id=t["id"]) for t in _WEBAUTHN_ALG_TESTS],
+)
+def test_webauthn_algorithms_conformance(test_case: dict[str, Any]) -> None:
+    """ADR 0010 — ES256 + RS256 + EdDSA dispatch via COSE_Key.alg."""
+    actual = _run_webauthn(_WEBAUTHN_ALG_SHARED, test_case)
     assert actual == test_case["expected"]["result"]

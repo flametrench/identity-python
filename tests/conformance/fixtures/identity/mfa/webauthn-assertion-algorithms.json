@@ -1,0 +1,103 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.2.0",
+  "capability": "identity",
+  "operation": "webauthn_verify_assertion",
+  "conformance_level": "MUST",
+  "spec_section": "decisions/0010-webauthn-rs256-eddsa.md",
+  "description": "WebAuthn assertion verification across the three v0.2 algorithms (ADR 0010): ES256, RS256, EdDSA. The SDK MUST detect the algorithm from the COSE_Key's `alg` field and dispatch to the matching primitive. Each algorithm has a happy-path test and a signature-tampered test. RS256 also gates against keys smaller than 2048-bit. The shared authenticatorData and clientDataJSON are reused across rows; only the COSE pubkey, signature, and algorithm dispatch differ.",
+  "shared": {
+    "stored_rp_id": "flametrench.test",
+    "expected_origin": "https://flametrench.test",
+    "expected_challenge_hex": "666c616d657472656e63682d776562617574686e2d6368616c6c656e67652d76302e32",
+    "stored_sign_count": 0,
+    "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990500000007",
+    "client_data_json_hex": "7b226368616c6c656e6765223a225a6d786862575630636d567559326774643256695958563061473474593268686247786c626d646c4c5859774c6a49222c226f726967696e223a2268747470733a2f2f666c616d657472656e63682e74657374222c2274797065223a22776562617574686e2e676574227d"
+  },
+  "tests": [
+    {
+      "id": "webauthn.alg.es256.valid",
+      "description": "Sanity: ES256 dispatch still works after the v0.2 algorithm-dispatch refactor. Identical to the existing webauthn-assertion.json happy path but with sign_count=7.",
+      "input": {
+        "cose_public_key_hex": "a501020326200121582060fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb62258207903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
+        "signature_hex": "304402207faa08a38dd559ba71ac349ccbfd06ec5e6df2b6349fc7980756ad6455e500fc02206dbe5a76bfa4926151c9136af2943570c988b4954a942d4e2a0b1c39965706c7"
+      },
+      "expected": {
+        "result": {
+          "ok": true,
+          "new_sign_count": 7
+        }
+      }
+    },
+    {
+      "id": "webauthn.alg.rs256.valid",
+      "description": "RS256 (RSASSA-PKCS1-v1_5 + SHA-256) over a 2048-bit key. The SDK MUST parse the COSE_Key's RSA shape (kty=3, alg=-257, -1=n, -2=e), construct a public key, and verify the raw RSA signature.",
+      "input": {
+        "cose_public_key_hex": "a401030339010020590100abe04aa015eb975548b46bfdae7fb6c4a4dae37a01eae97f1f6b962be2dcd6936c4bd3bacede9124808e67cadb46584bda4c031a6cb6e07c6056d12dbac7ff4648302e222df642fcb2f439e38e14cad865ea15fd0458306be0b1a5d3b011bbf9dc98f276d0be2c760a46dcf470519fdde76cf1f7fe13316670731fd72bf292108988070f005131c8829d76edc5dcce501e46f44e0a335a22940ebb650d2e924da976136d8bc4c325a9888ba8ac5458807a48a4459f91fc99eff50c06260a4076dc0d985225f857ddaba168cdd775464bafafba668a04c5d2625e73aa6cc3aea408e7b10043dbc8117e684f2183b17ebf89eccf70318ea26522567352e17ac18d2143010001",
+        "signature_hex": "56e98fe88cb959ec6cda90ce61a514ee193b3eb630361bd15df9be3ea8a7269f38208e67d01eb62537f965c68d4afed58165bfba356c11f7ad9b615cb75372779670e47590bc285f5ad513f4ef6f5fef3cef1d5e185f9042c4f212d0f9706470facb188c368719721226169722ef57899d6771ac6e91cda930aa57c223d08ff2f510d62c7e7ea6c410f6fb793ff70dd3efdd4cf13681b4fb08eee4ab8f02d1512fab2bc4a6578687df1f715ec8a7add0435ecef4f5cfcc097e2012ff6f30d89e6b07d951ca9177e8a44903f9bc7ef3995be7d07820434df7a6dd324748f1d36f09f140ca2107cc1e763f46a8d8843c88c34e2f309d9f32cfe8060f76b72c6858"
+      },
+      "expected": {
+        "result": {
+          "ok": true,
+          "new_sign_count": 7
+        }
+      }
+    },
+    {
+      "id": "webauthn.alg.rs256.signature_invalid",
+      "description": "RS256 with a single byte of the signature flipped MUST be rejected with reason=signature_invalid.",
+      "input": {
+        "cose_public_key_hex": "a401030339010020590100abe04aa015eb975548b46bfdae7fb6c4a4dae37a01eae97f1f6b962be2dcd6936c4bd3bacede9124808e67cadb46584bda4c031a6cb6e07c6056d12dbac7ff4648302e222df642fcb2f439e38e14cad865ea15fd0458306be0b1a5d3b011bbf9dc98f276d0be2c760a46dcf470519fdde76cf1f7fe13316670731fd72bf292108988070f005131c8829d76edc5dcce501e46f44e0a335a22940ebb650d2e924da976136d8bc4c325a9888ba8ac5458807a48a4459f91fc99eff50c06260a4076dc0d985225f857ddaba168cdd775464bafafba668a04c5d2625e73aa6cc3aea408e7b10043dbc8117e684f2183b17ebf89eccf70318ea26522567352e17ac18d2143010001",
+        "signature_hex": "56e98fe88cb959ec6cda90ce61a514ee193b3eb630361bd15df9be3ea8a7269f38208e67d01eb62537f965c68d4afed58165bfba356c11f7ad9b615cb75372779670e47590bc285f5ad513f4ef6f5fef3cef1d5e185f9042c4f212d0f9706470facb188c368719721226169722ef57899d6771ac6e91cda930aa57c223d08ff2f510d62c7e7ea6c410f6fb793ff70dd3efdd4cf13681b4fb08eee4ab8f02d1512fab2bc4a6578687df1f715ec8a7add0435ecef4f5cfcc097e2012ff6f30d89e6b07d951ca9177e8a44903f9bc7ef3995be7d07820434df7a6dd324748f1d36f09f140ca2107cc1e763f46a8d8843c88c34e2f309d9f32cfe8060f76b72c6859"
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "signature_invalid"
+        }
+      }
+    },
+    {
+      "id": "webauthn.alg.rs256.key_too_small",
+      "description": "RS256 with a 1024-bit RSA modulus MUST be rejected with reason=unsupported_key. WebAuthn \u00a75.8.5 floors RSA at 2048 bits; weaker keys are a non-conformant authenticator.",
+      "input": {
+        "cose_public_key_hex": "a4010303390100205880b2dbb8fe3c4ffb9f42c1b9e2af2e7d1a5b9ef9d87f8e5986a3957a550276ea83ce87cda367199f38a419802e59ffcff8ecc998aff6fb428e57ee332fcf19ba165027d0e7ba0d2a2031806e705e840dee59431d9744d7134af29a4c4d25753d80641c03cb8399ab54d9ff0e803bd1048bb7db66f98f8ec03eb7260601d84d32ef2143010001",
+        "signature_hex": "56e98fe88cb959ec6cda90ce61a514ee193b3eb630361bd15df9be3ea8a7269f38208e67d01eb62537f965c68d4afed58165bfba356c11f7ad9b615cb75372779670e47590bc285f5ad513f4ef6f5fef3cef1d5e185f9042c4f212d0f9706470facb188c368719721226169722ef57899d6771ac6e91cda930aa57c223d08ff2f510d62c7e7ea6c410f6fb793ff70dd3efdd4cf13681b4fb08eee4ab8f02d1512fab2bc4a6578687df1f715ec8a7add0435ecef4f5cfcc097e2012ff6f30d89e6b07d951ca9177e8a44903f9bc7ef3995be7d07820434df7a6dd324748f1d36f09f140ca2107cc1e763f46a8d8843c88c34e2f309d9f32cfe8060f76b72c6858"
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "unsupported_key"
+        }
+      }
+    },
+    {
+      "id": "webauthn.alg.eddsa.valid",
+      "description": "EdDSA (Ed25519) assertion. The SDK MUST parse the COSE_Key's OKP shape (kty=1, alg=-8, -1=6 for Ed25519, -2=x) and verify the 64-byte signature against the message authData || sha256(clientDataJSON).",
+      "input": {
+        "cose_public_key_hex": "a4010103272006215820d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "signature_hex": "0237db44028cfe8e97603d902855ce5ec47ef74f6652d028a9856da66847ec681bd3a6e2091a05ae776a6b94c53361764ecbadf9cd919d9f22d5a797b7b9d203"
+      },
+      "expected": {
+        "result": {
+          "ok": true,
+          "new_sign_count": 7
+        }
+      }
+    },
+    {
+      "id": "webauthn.alg.eddsa.signature_invalid",
+      "description": "EdDSA with a single byte of the signature flipped MUST be rejected with reason=signature_invalid.",
+      "input": {
+        "cose_public_key_hex": "a4010103272006215820d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        "signature_hex": "0237db44028cfe8e97603d902855ce5ec47ef74f6652d028a9856da66847ec681bd3a6e2091a05ae776a6b94c53361764ecbadf9cd919d9f22d5a797b7b9d202"
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "signature_invalid"
+        }
+      }
+    }
+  ]
+}

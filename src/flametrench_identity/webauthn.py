@@ -39,10 +39,12 @@ from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 
 from .errors import IdentityError
+
+# Minimum RSA modulus per ADR 0010 / WebAuthn §5.8.5.
+RSA_MIN_KEY_SIZE_BITS = 2048
 
 # ─── Errors ───────────────────────────────────────────────────────
 
@@ -155,32 +157,39 @@ _FLAG_ED = 0x80  # Extension Data included
 # ─── Minimal CBOR / COSE-key parsing ─────────────────────────────
 
 
-def _parse_cose_es256(cose_key: bytes) -> ec.EllipticCurvePublicKey:
-    """Parse a COSE_Key (RFC 8152) for the ES256 case only.
+def _parse_cose_key(cose_key: bytes):
+    """Parse a COSE_Key for any v0.2-supported algorithm.
 
-    The expected map shape is::
+    Returns ``(alg, public_key)`` where ``alg`` is the COSE alg integer
+    (-7, -257, or -8) and ``public_key`` is a ``cryptography`` public-key
+    object suitable for the verifier dispatch.
 
-        {
-          1 (kty):  2 (EC2),
-          3 (alg): -7 (ES256),
-          -1 (crv): 1 (P-256),
-          -2 (x):   <32 raw bytes>,
-          -3 (y):   <32 raw bytes>,
-        }
-
-    Anything else raises ``WebAuthnUnsupportedKeyError`` or
-    ``WebAuthnMalformedError``.
+    Per ADR 0010, the verifier dispatches on the COSE_Key's alg field;
+    the assertion does not re-declare the algorithm. This function is
+    the central registry of algorithm support.
     """
     fields = _decode_cbor_map(cose_key)
     kty = fields.get(1)
     alg = fields.get(3)
+    if alg == -7:
+        return alg, _parse_cose_es256(fields)
+    if alg == -257:
+        return alg, _parse_cose_rs256(fields)
+    if alg == -8:
+        return alg, _parse_cose_eddsa(fields)
+    raise WebAuthnUnsupportedKeyError(
+        f"Unsupported COSE alg: {alg!r} (kty={kty!r})"
+    )
+
+
+def _parse_cose_es256(fields: dict[int, object]) -> ec.EllipticCurvePublicKey:
+    """ES256 / ECDSA P-256 + SHA-256. COSE shape per RFC 8152 §13.1."""
+    kty = fields.get(1)
     crv = fields.get(-1)
     x = fields.get(-2)
     y = fields.get(-3)
     if kty != 2:
         raise WebAuthnUnsupportedKeyError(f"Unsupported COSE kty: {kty!r}")
-    if alg != -7:
-        raise WebAuthnUnsupportedKeyError(f"Unsupported COSE alg: {alg!r}")
     if crv != 1:
         raise WebAuthnUnsupportedKeyError(f"Unsupported COSE crv: {crv!r}")
     if not isinstance(x, (bytes, bytearray)) or len(x) != 32:
@@ -193,6 +202,42 @@ def _parse_cose_es256(cose_key: bytes) -> ec.EllipticCurvePublicKey:
         curve=ec.SECP256R1(),
     )
     return public_numbers.public_key()
+
+
+def _parse_cose_rs256(fields: dict[int, object]) -> rsa.RSAPublicKey:
+    """RS256 / RSASSA-PKCS1-v1_5 + SHA-256. COSE shape per RFC 8230 §4."""
+    kty = fields.get(1)
+    n = fields.get(-1)
+    e = fields.get(-2)
+    if kty != 3:
+        raise WebAuthnUnsupportedKeyError(f"RS256 requires COSE kty=3, got {kty!r}")
+    if not isinstance(n, (bytes, bytearray)):
+        raise WebAuthnMalformedError("COSE RSA modulus (n) must be a byte string")
+    if not isinstance(e, (bytes, bytearray)):
+        raise WebAuthnMalformedError("COSE RSA exponent (e) must be a byte string")
+    n_int = int.from_bytes(n, "big")
+    e_int = int.from_bytes(e, "big")
+    if n_int.bit_length() < RSA_MIN_KEY_SIZE_BITS:
+        raise WebAuthnUnsupportedKeyError(
+            f"RSA key {n_int.bit_length()}-bit is below the {RSA_MIN_KEY_SIZE_BITS}-bit floor"
+        )
+    return rsa.RSAPublicNumbers(e=e_int, n=n_int).public_key()
+
+
+def _parse_cose_eddsa(fields: dict[int, object]) -> ed25519.Ed25519PublicKey:
+    """EdDSA / Ed25519. COSE shape per RFC 8037 §2."""
+    kty = fields.get(1)
+    crv = fields.get(-1)
+    x = fields.get(-2)
+    if kty != 1:
+        raise WebAuthnUnsupportedKeyError(f"EdDSA requires COSE kty=1, got {kty!r}")
+    if crv != 6:
+        raise WebAuthnUnsupportedKeyError(
+            f"v0.2 EdDSA accepts only Ed25519 (crv=6), got crv={crv!r}"
+        )
+    if not isinstance(x, (bytes, bytearray)) or len(x) != 32:
+        raise WebAuthnMalformedError("Ed25519 public key must be 32 bytes")
+    return ed25519.Ed25519PublicKey.from_public_bytes(bytes(x))
 
 
 def _decode_cbor_map(buf: bytes) -> dict[int, object]:
@@ -389,16 +434,32 @@ def webauthn_verify_assertion(
             f"Sign count did not advance: stored={stored_sign_count}, got={auth.sign_count}"
         )
 
-    # Verify the ES256 signature over authData || sha256(clientDataJSON).
-    public_key = _parse_cose_es256(cose_public_key)
-    if not isinstance(public_key, ec.EllipticCurvePublicKey):  # pragma: no cover
-        raise WebAuthnUnsupportedKeyError("Public key is not EC")
+    # Verify the signature over authData || sha256(clientDataJSON).
+    # Algorithm dispatch per ADR 0010: COSE_Key.alg picks the verifier.
+    alg, public_key = _parse_cose_key(cose_public_key)
     client_hash = hashlib.sha256(client_data_json).digest()
     signed = authenticator_data + client_hash
-    if not _is_valid_der_ecdsa_signature(signature):
-        raise WebAuthnSignatureError("Signature is not a DER ECDSA structure")
     try:
-        public_key.verify(signature, signed, ec.ECDSA(hashes.SHA256()))
+        if alg == -7:
+            # ES256 — DER-encoded ECDSA signature
+            if not _is_valid_der_ecdsa_signature(signature):
+                raise WebAuthnSignatureError("Signature is not a DER ECDSA structure")
+            assert isinstance(public_key, ec.EllipticCurvePublicKey)
+            public_key.verify(signature, signed, ec.ECDSA(hashes.SHA256()))
+        elif alg == -257:
+            # RS256 — raw RSASSA-PKCS1-v1_5 signature, length = key modulus length
+            assert isinstance(public_key, rsa.RSAPublicKey)
+            public_key.verify(signature, signed, padding.PKCS1v15(), hashes.SHA256())
+        elif alg == -8:
+            # EdDSA / Ed25519 — 64 raw bytes
+            if len(signature) != 64:
+                raise WebAuthnSignatureError(
+                    f"Ed25519 signature must be 64 bytes, got {len(signature)}"
+                )
+            assert isinstance(public_key, ed25519.Ed25519PublicKey)
+            public_key.verify(signature, signed)
+        else:  # pragma: no cover — _parse_cose_key already gates this
+            raise WebAuthnUnsupportedKeyError(f"Unsupported alg dispatch: {alg!r}")
     except InvalidSignature as exc:
         raise WebAuthnSignatureError() from exc
 
