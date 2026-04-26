@@ -1,0 +1,209 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.2.0",
+  "capability": "identity",
+  "operation": "totp_compute",
+  "conformance_level": "MUST",
+  "spec_section": "decisions/0008-mfa.md",
+  "description": "RFC 6238 TOTP test vectors. Every conforming Flametrench identity SDK MUST produce these codes for the spec-pinned secrets and timestamps. Anchored on RFC 6238 §B so Flametrench is byte-identical to every other RFC-conformant implementation, not just to itself across SDKs. The shared secrets are the ASCII bytes of the indicated strings; SDKs MUST hash them as raw bytes (no base32 decoding at the algorithm boundary).",
+  "tests": [
+    {
+      "id": "totp.sha1.t-59",
+      "description": "RFC 6238 §B vector: SHA-1, t=59, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890",
+        "timestamp": 59,
+        "digits": 8,
+        "algorithm": "sha1"
+      },
+      "expected": { "result": "94287082" }
+    },
+    {
+      "id": "totp.sha1.t-1111111109",
+      "description": "RFC 6238 §B vector: SHA-1, t=1111111109, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890",
+        "timestamp": 1111111109,
+        "digits": 8,
+        "algorithm": "sha1"
+      },
+      "expected": { "result": "07081804" }
+    },
+    {
+      "id": "totp.sha1.t-1111111111",
+      "description": "RFC 6238 §B vector: SHA-1, t=1111111111, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890",
+        "timestamp": 1111111111,
+        "digits": 8,
+        "algorithm": "sha1"
+      },
+      "expected": { "result": "14050471" }
+    },
+    {
+      "id": "totp.sha1.t-1234567890",
+      "description": "RFC 6238 §B vector: SHA-1, t=1234567890, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890",
+        "timestamp": 1234567890,
+        "digits": 8,
+        "algorithm": "sha1"
+      },
+      "expected": { "result": "89005924" }
+    },
+    {
+      "id": "totp.sha1.t-2000000000",
+      "description": "RFC 6238 §B vector: SHA-1, t=2000000000, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890",
+        "timestamp": 2000000000,
+        "digits": 8,
+        "algorithm": "sha1"
+      },
+      "expected": { "result": "69279037" }
+    },
+    {
+      "id": "totp.sha1.t-20000000000",
+      "description": "RFC 6238 §B vector: SHA-1, t=20000000000, 8 digits. Verifies 64-bit time-counter handling beyond 32-bit unsigned.",
+      "input": {
+        "secret_ascii": "12345678901234567890",
+        "timestamp": 20000000000,
+        "digits": 8,
+        "algorithm": "sha1"
+      },
+      "expected": { "result": "65353130" }
+    },
+    {
+      "id": "totp.sha256.t-59",
+      "description": "RFC 6238 §B vector: SHA-256, t=59, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890123456789012",
+        "timestamp": 59,
+        "digits": 8,
+        "algorithm": "sha256"
+      },
+      "expected": { "result": "46119246" }
+    },
+    {
+      "id": "totp.sha256.t-1111111109",
+      "description": "RFC 6238 §B vector: SHA-256, t=1111111109, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890123456789012",
+        "timestamp": 1111111109,
+        "digits": 8,
+        "algorithm": "sha256"
+      },
+      "expected": { "result": "68084774" }
+    },
+    {
+      "id": "totp.sha256.t-1111111111",
+      "description": "RFC 6238 §B vector: SHA-256, t=1111111111, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890123456789012",
+        "timestamp": 1111111111,
+        "digits": 8,
+        "algorithm": "sha256"
+      },
+      "expected": { "result": "67062674" }
+    },
+    {
+      "id": "totp.sha256.t-1234567890",
+      "description": "RFC 6238 §B vector: SHA-256, t=1234567890, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890123456789012",
+        "timestamp": 1234567890,
+        "digits": 8,
+        "algorithm": "sha256"
+      },
+      "expected": { "result": "91819424" }
+    },
+    {
+      "id": "totp.sha256.t-2000000000",
+      "description": "RFC 6238 §B vector: SHA-256, t=2000000000, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890123456789012",
+        "timestamp": 2000000000,
+        "digits": 8,
+        "algorithm": "sha256"
+      },
+      "expected": { "result": "90698825" }
+    },
+    {
+      "id": "totp.sha256.t-20000000000",
+      "description": "RFC 6238 §B vector: SHA-256, t=20000000000, 8 digits.",
+      "input": {
+        "secret_ascii": "12345678901234567890123456789012",
+        "timestamp": 20000000000,
+        "digits": 8,
+        "algorithm": "sha256"
+      },
+      "expected": { "result": "77737706" }
+    },
+    {
+      "id": "totp.sha512.t-59",
+      "description": "RFC 6238 §B vector: SHA-512, t=59, 8 digits.",
+      "input": {
+        "secret_ascii": "1234567890123456789012345678901234567890123456789012345678901234",
+        "timestamp": 59,
+        "digits": 8,
+        "algorithm": "sha512"
+      },
+      "expected": { "result": "90693936" }
+    },
+    {
+      "id": "totp.sha512.t-1111111109",
+      "description": "RFC 6238 §B vector: SHA-512, t=1111111109, 8 digits.",
+      "input": {
+        "secret_ascii": "1234567890123456789012345678901234567890123456789012345678901234",
+        "timestamp": 1111111109,
+        "digits": 8,
+        "algorithm": "sha512"
+      },
+      "expected": { "result": "25091201" }
+    },
+    {
+      "id": "totp.sha512.t-1111111111",
+      "description": "RFC 6238 §B vector: SHA-512, t=1111111111, 8 digits.",
+      "input": {
+        "secret_ascii": "1234567890123456789012345678901234567890123456789012345678901234",
+        "timestamp": 1111111111,
+        "digits": 8,
+        "algorithm": "sha512"
+      },
+      "expected": { "result": "99943326" }
+    },
+    {
+      "id": "totp.sha512.t-1234567890",
+      "description": "RFC 6238 §B vector: SHA-512, t=1234567890, 8 digits.",
+      "input": {
+        "secret_ascii": "1234567890123456789012345678901234567890123456789012345678901234",
+        "timestamp": 1234567890,
+        "digits": 8,
+        "algorithm": "sha512"
+      },
+      "expected": { "result": "93441116" }
+    },
+    {
+      "id": "totp.sha512.t-2000000000",
+      "description": "RFC 6238 §B vector: SHA-512, t=2000000000, 8 digits.",
+      "input": {
+        "secret_ascii": "1234567890123456789012345678901234567890123456789012345678901234",
+        "timestamp": 2000000000,
+        "digits": 8,
+        "algorithm": "sha512"
+      },
+      "expected": { "result": "38618901" }
+    },
+    {
+      "id": "totp.sha512.t-20000000000",
+      "description": "RFC 6238 §B vector: SHA-512, t=20000000000, 8 digits.",
+      "input": {
+        "secret_ascii": "1234567890123456789012345678901234567890123456789012345678901234",
+        "timestamp": 20000000000,
+        "digits": 8,
+        "algorithm": "sha512"
+      },
+      "expected": { "result": "47863826" }
+    }
+  ]
+}

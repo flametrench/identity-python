@@ -1,0 +1,83 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.2.0",
+  "capability": "identity",
+  "operation": "generate_recovery_code",
+  "conformance_level": "MUST",
+  "spec_section": "decisions/0008-mfa.md",
+  "description": "Recovery-code format invariants. Codes are 12 ASCII characters in three hyphen-separated groups of four. The alphabet excludes 0/O/1/I/L (ambiguous when read aloud). Generation is non-deterministic, so this fixture exercises the format predicate `is_valid_recovery_code` rather than fixed string outputs.",
+  "tests": [
+    {
+      "id": "recovery.format.canonical_pass",
+      "description": "A canonical 12-char three-group code in the v0.2 alphabet MUST match the format predicate.",
+      "input": { "code": "ABCD-EFGH-JKMN" },
+      "expected": { "result": true }
+    },
+    {
+      "id": "recovery.format.digits_only",
+      "description": "Digits-only codes (excluding 0 and 1) MUST be valid.",
+      "input": { "code": "2345-6789-2345" },
+      "expected": { "result": true }
+    },
+    {
+      "id": "recovery.format.mixed",
+      "description": "Mixed letters and permitted digits MUST be valid.",
+      "input": { "code": "A2B3-C4D5-E6F7" },
+      "expected": { "result": true }
+    },
+    {
+      "id": "recovery.format.reject_zero",
+      "description": "Codes containing 0 MUST fail format validation (ambiguous with O).",
+      "input": { "code": "ABCD-EFGH-JKM0" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "recovery.format.reject_letter_o",
+      "description": "Codes containing O MUST fail format validation (ambiguous with 0).",
+      "input": { "code": "ABCD-EFGH-JKMO" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "recovery.format.reject_one",
+      "description": "Codes containing 1 MUST fail format validation (ambiguous with I/L).",
+      "input": { "code": "ABCD-EFGH-JK1N" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "recovery.format.reject_letter_i",
+      "description": "Codes containing I MUST fail format validation.",
+      "input": { "code": "ABCD-EFGH-JKMI" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "recovery.format.reject_letter_l",
+      "description": "Codes containing L MUST fail format validation.",
+      "input": { "code": "ABCD-EFGH-JKML" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "recovery.format.reject_lowercase",
+      "description": "Lowercase codes MUST fail format validation. Implementations normalize at the verification boundary; the canonical form is uppercase.",
+      "input": { "code": "abcd-efgh-jkmn" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "recovery.format.reject_too_short",
+      "description": "Codes with fewer than three groups MUST fail.",
+      "input": { "code": "ABCD-EFGH" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "recovery.format.reject_no_hyphens",
+      "description": "Codes without hyphens MUST fail format validation. Normalization MAY accept them at the verification boundary, but the canonical form requires hyphens.",
+      "input": { "code": "ABCDEFGHJKMN" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "recovery.format.reject_wrong_group_size",
+      "description": "Groups that aren't exactly four chars each MUST fail.",
+      "input": { "code": "ABC-EFGH-JKMN" },
+      "expected": { "result": false }
+    }
+  ]
+}
