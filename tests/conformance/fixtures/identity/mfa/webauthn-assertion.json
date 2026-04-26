@@ -1,0 +1,137 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.2.0",
+  "capability": "identity",
+  "operation": "webauthn_verify_assertion",
+  "conformance_level": "MUST",
+  "spec_section": "decisions/0008-mfa.md",
+  "description": "WebAuthn assertion verification. Every conforming Flametrench identity SDK MUST accept the happy-path assertion and reject each negative case. The keypair is pinned; the signature was produced by a Python reference run and is byte-stable in the fixture. Bytes are hex-encoded. Signatures are DER-encoded ECDSA per WebAuthn \u00a76.5.6 for ES256.",
+  "shared": {
+    "cose_public_key_hex": "a501020326200121582060fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb62258207903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
+    "stored_rp_id": "flametrench.test",
+    "expected_origin": "https://flametrench.test",
+    "expected_challenge_hex": "666c616d657472656e63682d776562617574686e2d6368616c6c656e67652d76302e32",
+    "stored_sign_count": 0
+  },
+  "tests": [
+    {
+      "id": "webauthn.assertion.valid",
+      "description": "Well-formed ES256 assertion with UP+UV set, advancing counter, matching RP ID/origin/challenge MUST verify. Returns the new sign count.",
+      "input": {
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990500000005",
+        "client_data_json_hex": "7b226368616c6c656e6765223a225a6d786862575630636d567559326774643256695958563061473474593268686247786c626d646c4c5859774c6a49222c226f726967696e223a2268747470733a2f2f666c616d657472656e63682e74657374222c2274797065223a22776562617574686e2e676574227d",
+        "signature_hex": "3045022100d241767471298da0ebf1ec71f183c0cb476ccd0b954e308a3b3ce145c232b95802203f61fbe05df21c5ee1e4de9ea3f2df7adac8b7a270f2d33c991dc114d28965bb",
+        "require_user_verified": true,
+        "require_user_present": true
+      },
+      "expected": {
+        "result": {
+          "ok": true,
+          "new_sign_count": 5
+        }
+      }
+    },
+    {
+      "id": "webauthn.assertion.rp_id_mismatch",
+      "description": "Assertion from an authenticator whose authenticatorData carries a different RP-ID hash MUST be rejected even if the signature itself verifies.",
+      "input": {
+        "authenticator_data_hex": "9834f30f8b807769d8d40e882f51d93a6db8b3f785357b3b7086326fbd575a530500000005",
+        "client_data_json_hex": "7b226368616c6c656e6765223a225a6d786862575630636d567559326774643256695958563061473474593268686247786c626d646c4c5859774c6a49222c226f726967696e223a2268747470733a2f2f666c616d657472656e63682e74657374222c2274797065223a22776562617574686e2e676574227d",
+        "signature_hex": "304502204f29c1a108d99699e13cca0ac7f96b21a2f6574cd0950eb33d0812886c19be0f022100d0dd74c2682871ac19c52cdc9c33bed4cb08927b1e3b1776977235353066e158",
+        "require_user_verified": true,
+        "require_user_present": true
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "rp_id_mismatch"
+        }
+      }
+    },
+    {
+      "id": "webauthn.assertion.user_not_verified",
+      "description": "Assertion missing the UV bit MUST be rejected when the verifier requires user verification (the v0.2 default).",
+      "input": {
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990100000005",
+        "client_data_json_hex": "7b226368616c6c656e6765223a225a6d786862575630636d567559326774643256695958563061473474593268686247786c626d646c4c5859774c6a49222c226f726967696e223a2268747470733a2f2f666c616d657472656e63682e74657374222c2274797065223a22776562617574686e2e676574227d",
+        "signature_hex": "30450221009f9ca44ff24e2c542910d5acc7d44ba7dc7e07a310e56100e6a630c1bf994e4902206c1ba3b533061115c81a3e8c26ecba6af406bead39da5086f9d0fc2605550c43",
+        "require_user_verified": true,
+        "require_user_present": true
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "user_not_verified"
+        }
+      }
+    },
+    {
+      "id": "webauthn.assertion.origin_mismatch",
+      "description": "Assertion whose clientDataJSON.origin does not match the expected origin MUST be rejected \u2014 this catches phishing where the user followed a typo'd link.",
+      "input": {
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990500000005",
+        "client_data_json_hex": "7b226368616c6c656e6765223a225a6d786862575630636d567559326774643256695958563061473474593268686247786c626d646c4c5859774c6a49222c226f726967696e223a2268747470733a2f2f61747461636b65722e74657374222c2274797065223a22776562617574686e2e676574227d",
+        "signature_hex": "304602210089db194646d6d16e75648a17056c38cac0b953f82d42b91cc4ac112636420c08022100d6af1cd0fc77a3398b77db7a4db4c745ab0f45da898d6bc7b4d9400cc00d5104",
+        "require_user_verified": true,
+        "require_user_present": true
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "origin_mismatch"
+        }
+      }
+    },
+    {
+      "id": "webauthn.assertion.challenge_mismatch",
+      "description": "Assertion whose clientDataJSON.challenge does not match the issued challenge MUST be rejected \u2014 replay protection.",
+      "input": {
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990500000005",
+        "client_data_json_hex": "7b226368616c6c656e6765223a225a476c6d5a6d56795a5735304c574e6f595778735a57356e5a51222c226f726967696e223a2268747470733a2f2f666c616d657472656e63682e74657374222c2274797065223a22776562617574686e2e676574227d",
+        "signature_hex": "3044022003fbc76c487f007ed2550dadaaf0fa647a013976e579b088c4f99b90b8542ddc02206934c43a1c27682e142a180f49246dda2c481818bd4891737b3ea22bbd4840c7",
+        "require_user_verified": true,
+        "require_user_present": true
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "challenge_mismatch"
+        }
+      }
+    },
+    {
+      "id": "webauthn.assertion.signature_invalid",
+      "description": "Tampered signature (single byte flipped) MUST be rejected.",
+      "input": {
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990500000005",
+        "client_data_json_hex": "7b226368616c6c656e6765223a225a6d786862575630636d567559326774643256695958563061473474593268686247786c626d646c4c5859774c6a49222c226f726967696e223a2268747470733a2f2f666c616d657472656e63682e74657374222c2274797065223a22776562617574686e2e676574227d",
+        "signature_hex": "3045022100d241767471298da0ebf1ec71f183c0cb476ccd0b954e308a3b3ce145c232b95802203f61fbe05df21c5ee1e4de9ea3f2df7adac8b7a270f2d33c991dc114d28965ba",
+        "require_user_verified": true,
+        "require_user_present": true
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "signature_invalid"
+        }
+      }
+    },
+    {
+      "id": "webauthn.assertion.type_mismatch",
+      "description": "clientDataJSON.type other than 'webauthn.get' MUST be rejected (this prevents reusing a registration clientDataJSON as an assertion).",
+      "input": {
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990500000005",
+        "client_data_json_hex": "7b226368616c6c656e6765223a225a6d786862575630636d567559326774643256695958563061473474593268686247786c626d646c4c5859774c6a49222c226f726967696e223a2268747470733a2f2f666c616d657472656e63682e74657374222c2274797065223a22776562617574686e2e637265617465227d",
+        "signature_hex": "30450220200a15518b21eed2a13d658281f52d019b72f3fd8ab5a66fc4bef572533cae83022100ce116143147058870b885d37958473f8fcb2a89bb0474ca5ccfd19d5a01b92fd",
+        "require_user_verified": true,
+        "require_user_present": true
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "type_mismatch"
+        }
+      }
+    }
+  ]
+}

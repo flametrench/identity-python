@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
     "flametrench-ids>=0.1.0",
     "argon2-cffi>=23.1.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

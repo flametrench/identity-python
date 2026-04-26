@@ -1,0 +1,78 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.2.0",
+  "capability": "identity",
+  "operation": "webauthn_verify_assertion",
+  "conformance_level": "MUST",
+  "spec_section": "decisions/0008-mfa.md",
+  "description": "WebAuthn signature-counter monotonicity per spec \u00a76.1.1. A counter that fails to strictly advance \u2014 when at least one of stored/incoming is non-zero \u2014 is the cloned-authenticator signal and MUST be rejected. The both-zero case is permitted (some authenticators do not track a counter).",
+  "shared": {
+    "cose_public_key_hex": "a501020326200121582060fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb62258207903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
+    "stored_rp_id": "flametrench.test",
+    "expected_origin": "https://flametrench.test",
+    "expected_challenge_hex": "666c616d657472656e63682d776562617574686e2d6368616c6c656e67652d76302e32",
+    "client_data_json_hex": "7b226368616c6c656e6765223a225a6d786862575630636d567559326774643256695958563061473474593268686247786c626d646c4c5859774c6a49222c226f726967696e223a2268747470733a2f2f666c616d657472656e63682e74657374222c2274797065223a22776562617574686e2e676574227d"
+  },
+  "tests": [
+    {
+      "id": "webauthn.counter.equal_rejected",
+      "description": "Stored=10, incoming=10. Equal counters with non-zero values MUST be rejected \u2014 the spec treats equality as a cloned-authenticator signal.",
+      "input": {
+        "stored_sign_count": 10,
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e09499050000000a",
+        "signature_hex": "304502210087d550079529cc6895b42dc09028ab55dd0f1e4add5c6c55bdcf35e8675a4b270220270e489187207c176db87015f748c74f40749a444a7bf1a6877093023503299f"
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "counter_regression"
+        }
+      }
+    },
+    {
+      "id": "webauthn.counter.lesser_rejected",
+      "description": "Stored=10, incoming=7. A counter that decreases is the clearest cloned-authenticator signal.",
+      "input": {
+        "stored_sign_count": 10,
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990500000007",
+        "signature_hex": "304502200827e7a710bbdb25f22e237341cba971cec6df91a2257509f22313f5c4a3de15022100e7b7d6ca1bb277d48ff52139e2c79c32cb8580cce776b9da6158ecd603e178d7"
+      },
+      "expected": {
+        "result": {
+          "ok": false,
+          "reason": "counter_regression"
+        }
+      }
+    },
+    {
+      "id": "webauthn.counter.greater_accepted",
+      "description": "Stored=10, incoming=11. A strictly-greater counter is the normal path; verifier returns the new sign count.",
+      "input": {
+        "stored_sign_count": 10,
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e09499050000000b",
+        "signature_hex": "3045022100b52f0995aab52ebf315f1b0e03b3dadc8a2df2d72451a4216d8076b44ace2597022046b7d878cbb758928eb4786a7b28e547bc17955041f0c4be3403914eabe524e6"
+      },
+      "expected": {
+        "result": {
+          "ok": true,
+          "new_sign_count": 11
+        }
+      }
+    },
+    {
+      "id": "webauthn.counter.both_zero_accepted",
+      "description": "Stored=0, incoming=0. Authenticators that do not support a counter signal both as zero; spec permits this case.",
+      "input": {
+        "stored_sign_count": 0,
+        "authenticator_data_hex": "ab19f54596275ecbc737f2bd9a005db9c9c2494d9cb68b0bdd30d20c99e094990500000000",
+        "signature_hex": "304502206d8eed00ffef72ceddcb4b8ce574244f3411d68d075982092c2d65c4a1d94604022100812f40976cecbcaf88d6752d0269624a9d5e7d7a5b91e5a47d9ef116c7771a9b"
+      },
+      "expected": {
+        "result": {
+          "ok": true,
+          "new_sign_count": 0
+        }
+      }
+    }
+  ]
+}

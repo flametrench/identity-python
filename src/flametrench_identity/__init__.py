@@ -49,6 +49,22 @@ from .mfa import (
     totp_verify,
 )
 from .store import IdentityStore
+from .webauthn import (
+    WebAuthnAssertionResult,
+    WebAuthnChallengeMismatchError,
+    WebAuthnCounterRegressionError,
+    WebAuthnError,
+    WebAuthnMalformedError,
+    WebAuthnOriginMismatchError,
+    WebAuthnRpIdMismatchError,
+    WebAuthnSignatureError,
+    WebAuthnTypeMismatchError,
+    WebAuthnUnsupportedKeyError,
+    WebAuthnUserNotPresentError,
+    WebAuthnUserNotVerifiedError,
+    cose_key_es256,
+    webauthn_verify_assertion,
+)
 from .types import (
     ARGON2ID_FLOOR,
     Credential,
@@ -100,7 +116,20 @@ __all__ = [
     "User",
     "UserMfaPolicy",
     "VerifiedCredential",
+    "WebAuthnAssertionResult",
+    "WebAuthnChallengeMismatchError",
+    "WebAuthnCounterRegressionError",
+    "WebAuthnError",
     "WebAuthnFactor",
+    "WebAuthnMalformedError",
+    "WebAuthnOriginMismatchError",
+    "WebAuthnRpIdMismatchError",
+    "WebAuthnSignatureError",
+    "WebAuthnTypeMismatchError",
+    "WebAuthnUnsupportedKeyError",
+    "WebAuthnUserNotPresentError",
+    "WebAuthnUserNotVerifiedError",
+    "cose_key_es256",
     "generate_recovery_code",
     "generate_recovery_codes",
     "generate_totp_secret",
@@ -111,6 +140,7 @@ __all__ = [
     "totp_otpauth_uri",
     "totp_verify",
     "verify_password_hash",
+    "webauthn_verify_assertion",
 ]
 
 __version__ = "0.1.0"
