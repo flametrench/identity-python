@@ -190,6 +190,16 @@ def totp_verify(
     """
     if timestamp is None:
         timestamp = int(datetime.now(timezone.utc).timestamp())
+    if drift_windows < 0 or drift_windows > 10:
+        # Cap the verifier search radius. Each window adds one HMAC
+        # computation, so unbounded values amount to a CPU-exhaustion
+        # primitive. The default ±1 covers normal clock skew; ±10 is
+        # the operational ceiling. RFC 6238 §5.2 cautions against
+        # large windows for a different reason (security degradation),
+        # but a hard cap addresses both concerns.
+        raise ValueError(
+            f"drift_windows must be 0..10, got {drift_windows}"
+        )
     if not candidate or len(candidate) != digits or not candidate.isdigit():
         return False
     for window_offset in range(-drift_windows, drift_windows + 1):

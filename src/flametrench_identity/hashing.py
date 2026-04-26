@@ -33,6 +33,21 @@ _HASHER = PasswordHasher(
     type=Argon2Type.ID,
 )
 
+# Hard cap on plaintext length before Argon2id. Most password managers
+# cap user-input passwords at 256 bytes; legitimate passphrases never
+# need 1024. Without a cap, a caller can pass a multi-megabyte string
+# and burn the Argon2id memory cost (m=19 MiB) repeatedly. Reject
+# rather than truncate so the caller learns about it.
+MAX_PASSWORD_BYTES = 1024
+
+
+def _check_password_length(plaintext: str) -> None:
+    if len(plaintext.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"password exceeds {MAX_PASSWORD_BYTES}-byte cap "
+            f"(got {len(plaintext.encode('utf-8'))} bytes)"
+        )
+
 
 def verify_password_hash(phc_hash: str, candidate_password: str) -> bool:
     """Verify a candidate plaintext password against a PHC-encoded Argon2id hash.
@@ -41,7 +56,12 @@ def verify_password_hash(phc_hash: str, candidate_password: str) -> bool:
     hash, unsupported variant) — never raises on bad input. The contract
     is "did this plaintext produce that hash?", and the answer to a
     malformed hash is "no".
+
+    Plaintext over :data:`MAX_PASSWORD_BYTES` raises ``ValueError`` —
+    that is a caller-side input-validation failure, not a verification
+    outcome.
     """
+    _check_password_length(candidate_password)
     try:
         return _HASHER.verify(phc_hash, candidate_password)
     except (
@@ -60,5 +80,7 @@ def hash_password(plaintext: str) -> str:
 
     Returns a PHC-encoded string that verifies against
     ``verify_password_hash`` on any conforming Flametrench identity SDK.
+    Plaintext over :data:`MAX_PASSWORD_BYTES` raises ``ValueError``.
     """
+    _check_password_length(plaintext)
     return _HASHER.hash(plaintext)
