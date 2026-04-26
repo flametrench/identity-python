@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flametrench-identity"
-version = "0.2.0rc2"
+version = "0.2.0rc3"
 description = "Identity primitives for Flametrench: users, credentials (Argon2id-pinned passwords, passkeys, OIDC), and user-bound sessions with rotation on refresh."
 readme = "README.md"
 license = { text = "Apache-2.0" }
