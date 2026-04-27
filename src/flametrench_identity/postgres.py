@@ -261,15 +261,22 @@ class PostgresIdentityStore:
 
     @contextmanager
     def _tx(self) -> Iterator[Any]:
-        try:
+        """Run the wrapped block inside an explicit transaction.
+
+        Uses psycopg3's ``connection.transaction()`` context manager
+        rather than ``commit()``/``rollback()`` directly. This is
+        correct under BOTH ``autocommit=False`` (the default) AND
+        ``autocommit=True``: under autocommit=True, the bare
+        commit-on-success / rollback-on-error pattern would NOT hold
+        ``FOR UPDATE`` row locks across statements, breaking the
+        atomicity guarantees the spec requires for revoke_user
+        cascade, credential rotation, refresh_session, MFA confirm/
+        verify, and recovery-slot consumption. ``transaction()``
+        issues an explicit ``BEGIN``/``COMMIT`` regardless of the
+        connection's autocommit setting.
+        """
+        with self._conn.transaction():
             yield self._conn
-            self._conn.commit()
-        except Exception:
-            try:
-                self._conn.rollback()
-            except Exception:
-                pass
-            raise
 
     # ─── Users ───
 
