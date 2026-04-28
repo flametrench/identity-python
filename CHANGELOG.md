@@ -3,6 +3,11 @@
 All notable changes to `flametrench-identity` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.2.0rc5] — 2026-04-27
+
+### Fixed (security posture)
+- `verify_password` now consults `usr_mfa_policy` and returns `VerifiedCredential.mfa_required = True` when a user has `required = True` AND the grace window has elapsed (or was never set). Previously the policy table was decorative — the SDK never read it, so an adopter configuring per-user MFA enforcement could be bypassed by application code that called `create_session` directly without checking the policy. The new field is additive (defaults to `False`), so adopters who do not configure a policy see no behavioral change. Applications MUST gate `create_session` on `mfa_required` by calling `verify_mfa` first when it is `True`. (ADR 0008.)
+
 ## [v0.2.0rc4] — 2026-04-27
 
 ### Added

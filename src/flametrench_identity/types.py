@@ -146,6 +146,12 @@ class SessionWithToken:
 class VerifiedCredential:
     usr_id: str
     cred_id: str
+    # ``True`` when ``usr_mfa_policy.required`` is true AND the grace
+    # window has elapsed (or was never set). Applications MUST call
+    # ``verify_mfa`` before ``create_session`` when this is true.
+    # Defaults to ``False`` so adopters who never enable a policy see
+    # no behavioral change. (ADR 0008.)
+    mfa_required: bool = False
 
 
 @dataclass(frozen=True)

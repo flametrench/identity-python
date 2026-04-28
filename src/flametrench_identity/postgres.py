@@ -743,9 +743,25 @@ class PostgresIdentityStore:
             raise InvalidCredentialError("Invalid credential")
         if not verify_password_hash(str(row[6]), password):
             raise InvalidCredentialError("Invalid credential")
+        usr_uuid = str(row[1])
+        # ADR 0008: surface usr_mfa_policy state. Applications MUST
+        # gate create_session on mfa_required by calling verify_mfa
+        # first when this is true.
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT required, grace_until FROM usr_mfa_policy WHERE usr_id = %s",
+                (usr_uuid,),
+            )
+            policy_row = cur.fetchone()
+        mfa_required = False
+        if policy_row is not None and bool(policy_row[0]):
+            grace = policy_row[1]
+            if grace is None or grace <= self._now():
+                mfa_required = True
         return VerifiedCredential(
-            usr_id=_encode("usr", str(row[1])),
+            usr_id=_encode("usr", usr_uuid),
             cred_id=_encode("cred", str(row[0])),
+            mfa_required=mfa_required,
         )
 
     # ─── Sessions ───

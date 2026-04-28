@@ -118,6 +118,47 @@ class TestPasswordCredential:
         with pytest.raises(InvalidCredentialError):
             store.verify_password("alice@example.com", "v1")
 
+    # ─── ADR 0008: usr_mfa_policy gate on verifyPassword ───
+
+    def test_verify_password_mfa_required_false_when_no_policy(
+        self, store: InMemoryIdentityStore
+    ) -> None:
+        u = store.create_user()
+        store.create_password_credential(u.id, "alice@example.com", "pw")
+        verified = store.verify_password("alice@example.com", "pw")
+        assert verified.mfa_required is False
+
+    def test_verify_password_mfa_required_true_when_policy_active_and_no_grace(
+        self, store: InMemoryIdentityStore
+    ) -> None:
+        u = store.create_user()
+        store.create_password_credential(u.id, "alice@example.com", "pw")
+        store.set_mfa_policy(u.id, required=True, grace_until=None)
+        verified = store.verify_password("alice@example.com", "pw")
+        assert verified.mfa_required is True
+
+    def test_verify_password_mfa_required_false_during_grace_window(
+        self, store: InMemoryIdentityStore
+    ) -> None:
+        from datetime import timedelta
+
+        u = store.create_user()
+        store.create_password_credential(u.id, "alice@example.com", "pw")
+        future = store._now() + timedelta(days=7)  # type: ignore[attr-defined]
+        store.set_mfa_policy(u.id, required=True, grace_until=future)
+        verified = store.verify_password("alice@example.com", "pw")
+        assert verified.mfa_required is False
+
+    def test_verify_password_mfa_required_true_when_required_false(
+        self, store: InMemoryIdentityStore
+    ) -> None:
+        # Policy exists but required=false → never gates.
+        u = store.create_user()
+        store.create_password_credential(u.id, "alice@example.com", "pw")
+        store.set_mfa_policy(u.id, required=False, grace_until=None)
+        verified = store.verify_password("alice@example.com", "pw")
+        assert verified.mfa_required is False
+
 
 class TestSessionLifecycle:
     def test_create_then_verify_token(self, store: InMemoryIdentityStore) -> None:

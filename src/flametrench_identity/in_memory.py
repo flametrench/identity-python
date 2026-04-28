@@ -536,7 +536,17 @@ class InMemoryIdentityStore:
         phc = self._password_hashes.get(cred_id)
         if phc is None or not verify_password_hash(phc, password):
             raise InvalidCredentialError()
-        return VerifiedCredential(usr_id=cred.usr_id, cred_id=cred.id)
+        # ADR 0008: surface usr_mfa_policy state.
+        policy = self._mfa_policies.get(cred.usr_id)
+        mfa_required = False
+        if policy is not None and policy.required:
+            if policy.grace_until is None or policy.grace_until <= self._now():
+                mfa_required = True
+        return VerifiedCredential(
+            usr_id=cred.usr_id,
+            cred_id=cred.id,
+            mfa_required=mfa_required,
+        )
 
     # ─── Sessions ───
 
