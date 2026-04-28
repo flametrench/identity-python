@@ -32,13 +32,20 @@ jobs:
           --health-retries 5
 
     env:
-      # Enables PostgresIdentityStore integration tests. Test fixtures
-      # apply the schema themselves on each run; unset → skip gracefully.
       IDENTITY_POSTGRES_URL: postgresql://postgres:test@localhost:5432/flametrench_test
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Checkout flametrench/ids-python
+        # Bootstrap the upstream `ids` dep from its sibling GitHub repo
+        # until v0.2.x is published to PyPI.
+        uses: actions/checkout@v4
+        with:
+          repository: flametrench/ids-python
+          ref: v0.2.0rc2
+          path: _vendored/ids-python
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -46,7 +53,10 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install ids dep from sibling checkout
+        run: pip install ./_vendored/ids-python
+
+      - name: Install package
         run: pip install -e '.[dev]'
 
       - name: Run tests
