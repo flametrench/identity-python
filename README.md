@@ -1,5 +1,7 @@
 # flametrench-identity
 
+[![CI](https://github.com/flametrench/identity-python/actions/workflows/ci.yml/badge.svg)](https://github.com/flametrench/identity-python/actions/workflows/ci.yml)
+
 Python SDK for the [Flametrench](https://github.com/flametrench/spec) identity specification: users, credentials (Argon2id-pinned passwords, passkeys, OIDC), user-bound sessions with rotation on refresh, and v0.2 multi-factor authentication ([ADR 0008](https://github.com/flametrench/spec/blob/main/decisions/0008-mfa.md), [ADR 0010](https://github.com/flametrench/spec/blob/main/decisions/0010-webauthn-rs256-eddsa.md)) — TOTP (RFC 6238), recovery codes, and WebAuthn assertion verification across ES256 / RS256 / EdDSA.
 
 **Status:** v0.2.0rc4 (release candidate). Includes the production-ready `PostgresIdentityStore` alongside the in-memory reference store.
