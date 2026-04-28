@@ -44,7 +44,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: flametrench/ids-python
-          ref: v0.2.0rc2
+          ref: v0.2.0rc3
           path: _vendored/ids-python
 
       - name: Setup Python
