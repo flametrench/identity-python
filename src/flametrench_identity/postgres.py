@@ -303,16 +303,23 @@ class PostgresIdentityStore:
 
     def create_user(self, *, display_name: str | None = None) -> User:
         usr_uuid = _decode(_generate("usr")).uuid
-        with self._conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO usr (id, display_name) VALUES (%s, %s)
-                RETURNING id, status, display_name, created_at, updated_at
-                """,
-                (usr_uuid, display_name),
-            )
-            row = cur.fetchone()
-        self._conn.commit()
+        # ADR 0013: connection.transaction() opens BEGIN when standalone
+        # and SAVEPOINT when nested inside an adopter's outer transaction
+        # (psycopg3 inspects the connection's transaction_status). This
+        # is a passthrough for callers that aren't wrapping multiple SDK
+        # calls; for callers that are, single-statement INSERTs are
+        # savepoint-shielded so a constraint violation rolls back to the
+        # savepoint instead of poisoning the outer transaction.
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO usr (id, display_name) VALUES (%s, %s)
+                    RETURNING id, status, display_name, created_at, updated_at
+                    """,
+                    (usr_uuid, display_name),
+                )
+                row = cur.fetchone()
         assert row is not None
         return _row_to_user(row)
 
@@ -528,23 +535,23 @@ class PostgresIdentityStore:
         cred_uuid = _decode(_generate("cred")).uuid
         password_hash = hash_password(password)
         try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO cred (id, usr_id, type, identifier, password_hash)
-                    VALUES (%s, %s, 'password', %s, %s)
-                    RETURNING {_CRED_COLS}
-                    """,
-                    (cred_uuid, usr_uuid, identifier, password_hash),
-                )
-                row = cur.fetchone()
-            self._conn.commit()
+            with self._conn.transaction():
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO cred (id, usr_id, type, identifier, password_hash)
+                        VALUES (%s, %s, 'password', %s, %s)
+                        RETURNING {_CRED_COLS}
+                        """,
+                        (cred_uuid, usr_uuid, identifier, password_hash),
+                    )
+                    row = cur.fetchone()
             assert row is not None
             cred = _row_to_cred(row)
             assert isinstance(cred, PasswordCredential)
             return cred
         except Exception as exc:
-            self._conn.rollback()
+            # transaction() already rolled back to savepoint or BEGIN/COMMIT.
             if _is_unique_violation(exc):
                 raise DuplicateCredentialError(
                     f"An active password credential already exists for identifier {identifier}",
@@ -562,24 +569,23 @@ class PostgresIdentityStore:
         usr_uuid = self._ensure_user_active(self._conn, usr_id)
         cred_uuid = _decode(_generate("cred")).uuid
         try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO cred (id, usr_id, type, identifier,
-                                      passkey_public_key, passkey_sign_count, passkey_rp_id)
-                    VALUES (%s, %s, 'passkey', %s, %s, %s, %s)
-                    RETURNING {_CRED_COLS}
-                    """,
-                    (cred_uuid, usr_uuid, identifier, public_key, sign_count, rp_id),
-                )
-                row = cur.fetchone()
-            self._conn.commit()
+            with self._conn.transaction():
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO cred (id, usr_id, type, identifier,
+                                          passkey_public_key, passkey_sign_count, passkey_rp_id)
+                        VALUES (%s, %s, 'passkey', %s, %s, %s, %s)
+                        RETURNING {_CRED_COLS}
+                        """,
+                        (cred_uuid, usr_uuid, identifier, public_key, sign_count, rp_id),
+                    )
+                    row = cur.fetchone()
             assert row is not None
             cred = _row_to_cred(row)
             assert isinstance(cred, PasskeyCredential)
             return cred
         except Exception as exc:
-            self._conn.rollback()
             if _is_unique_violation(exc):
                 raise DuplicateCredentialError(
                     f"An active passkey credential already exists for identifier {identifier}",
@@ -596,23 +602,22 @@ class PostgresIdentityStore:
         usr_uuid = self._ensure_user_active(self._conn, usr_id)
         cred_uuid = _decode(_generate("cred")).uuid
         try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO cred (id, usr_id, type, identifier, oidc_issuer, oidc_subject)
-                    VALUES (%s, %s, 'oidc', %s, %s, %s)
-                    RETURNING {_CRED_COLS}
-                    """,
-                    (cred_uuid, usr_uuid, identifier, oidc_issuer, oidc_subject),
-                )
-                row = cur.fetchone()
-            self._conn.commit()
+            with self._conn.transaction():
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO cred (id, usr_id, type, identifier, oidc_issuer, oidc_subject)
+                        VALUES (%s, %s, 'oidc', %s, %s, %s)
+                        RETURNING {_CRED_COLS}
+                        """,
+                        (cred_uuid, usr_uuid, identifier, oidc_issuer, oidc_subject),
+                    )
+                    row = cur.fetchone()
             assert row is not None
             cred = _row_to_cred(row)
             assert isinstance(cred, OidcCredential)
             return cred
         except Exception as exc:
-            self._conn.rollback()
             if _is_unique_violation(exc):
                 raise DuplicateCredentialError(
                     f"An active oidc credential already exists for identifier {identifier}",
@@ -1025,17 +1030,17 @@ class PostgresIdentityStore:
 
     def revoke_session(self, ses_id: str) -> Session:
         uuid = _wire_to_uuid(ses_id)
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE ses SET revoked_at = COALESCE(revoked_at, %s)
-                WHERE id = %s
-                RETURNING {_SES_COLS}
-                """,
-                (self._now(), uuid),
-            )
-            row = cur.fetchone()
-        self._conn.commit()
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE ses SET revoked_at = COALESCE(revoked_at, %s)
+                    WHERE id = %s
+                    RETURNING {_SES_COLS}
+                    """,
+                    (self._now(), uuid),
+                )
+                row = cur.fetchone()
         if row is None:
             raise NotFoundError(f"Session {ses_id} not found")
         return _row_to_session(row)
@@ -1078,23 +1083,23 @@ class PostgresIdentityStore:
         secret = generate_totp_secret()
         mfa_uuid = _decode(_generate("mfa")).uuid
         expires_at = now + timedelta(seconds=PENDING_FACTOR_TTL_SECONDS)
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""
-                INSERT INTO mfa (id, usr_id, type, status, identifier,
-                                 totp_secret, totp_algorithm, totp_digits, totp_period,
-                                 pending_expires_at, created_at, updated_at)
-                VALUES (%s, %s, 'totp', 'pending', %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING {_MFA_COLS}
-                """,
-                (
-                    mfa_uuid, usr_uuid, identifier, secret,
-                    DEFAULT_TOTP_ALGORITHM, DEFAULT_TOTP_DIGITS, DEFAULT_TOTP_PERIOD,
-                    expires_at, now, now,
-                ),
-            )
-            row = cur.fetchone()
-        self._conn.commit()
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO mfa (id, usr_id, type, status, identifier,
+                                     totp_secret, totp_algorithm, totp_digits, totp_period,
+                                     pending_expires_at, created_at, updated_at)
+                    VALUES (%s, %s, 'totp', 'pending', %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING {_MFA_COLS}
+                    """,
+                    (
+                        mfa_uuid, usr_uuid, identifier, secret,
+                        DEFAULT_TOTP_ALGORITHM, DEFAULT_TOTP_DIGITS, DEFAULT_TOTP_PERIOD,
+                        expires_at, now, now,
+                    ),
+                )
+                row = cur.fetchone()
         assert row is not None
         factor = _row_to_factor(row)
         assert isinstance(factor, TotpFactor)
@@ -1121,29 +1126,28 @@ class PostgresIdentityStore:
         mfa_uuid = _decode(_generate("mfa")).uuid
         expires_at = now + timedelta(seconds=PENDING_FACTOR_TTL_SECONDS)
         try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO mfa (id, usr_id, type, status, identifier,
-                                     webauthn_public_key, webauthn_sign_count, webauthn_rp_id,
-                                     webauthn_aaguid, webauthn_transports,
-                                     pending_expires_at, created_at, updated_at)
-                    VALUES (%s, %s, 'webauthn', 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING {_MFA_COLS}
-                    """,
-                    (
-                        mfa_uuid, usr_uuid, identifier, public_key, sign_count, rp_id,
-                        aaguid, transports, expires_at, now, now,
-                    ),
-                )
-                row = cur.fetchone()
-            self._conn.commit()
+            with self._conn.transaction():
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO mfa (id, usr_id, type, status, identifier,
+                                         webauthn_public_key, webauthn_sign_count, webauthn_rp_id,
+                                         webauthn_aaguid, webauthn_transports,
+                                         pending_expires_at, created_at, updated_at)
+                        VALUES (%s, %s, 'webauthn', 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING {_MFA_COLS}
+                        """,
+                        (
+                            mfa_uuid, usr_uuid, identifier, public_key, sign_count, rp_id,
+                            aaguid, transports, expires_at, now, now,
+                        ),
+                    )
+                    row = cur.fetchone()
             assert row is not None
             factor = _row_to_factor(row)
             assert isinstance(factor, WebAuthnFactor)
             return WebAuthnEnrollmentResult(factor=factor)
         except Exception as exc:
-            self._conn.rollback()
             if _is_unique_violation(exc):
                 raise PreconditionError(
                     f"WebAuthn credential {identifier!r} is already enrolled",
@@ -1159,25 +1163,24 @@ class PostgresIdentityStore:
         consumed = [False] * len(codes)
         mfa_uuid = _decode(_generate("mfa")).uuid
         try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO mfa (id, usr_id, type, status,
-                                     recovery_hashes, recovery_consumed,
-                                     created_at, updated_at)
-                    VALUES (%s, %s, 'recovery', 'active', %s, %s, %s, %s)
-                    RETURNING {_MFA_COLS}
-                    """,
-                    (mfa_uuid, usr_uuid, hashes, consumed, now, now),
-                )
-                row = cur.fetchone()
-            self._conn.commit()
+            with self._conn.transaction():
+                with self._conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO mfa (id, usr_id, type, status,
+                                         recovery_hashes, recovery_consumed,
+                                         created_at, updated_at)
+                        VALUES (%s, %s, 'recovery', 'active', %s, %s, %s, %s)
+                        RETURNING {_MFA_COLS}
+                        """,
+                        (mfa_uuid, usr_uuid, hashes, consumed, now, now),
+                    )
+                    row = cur.fetchone()
             assert row is not None
             factor = _row_to_factor(row)
             assert isinstance(factor, RecoveryFactor)
             return RecoveryEnrollmentResult(factor=factor, codes=codes)
         except Exception as exc:
-            self._conn.rollback()
             if _is_unique_violation(exc):
                 raise PreconditionError(
                     f"User {usr_id} already has an active recovery factor; revoke before re-enrolling",
@@ -1454,22 +1457,22 @@ class PostgresIdentityStore:
         grace_until: datetime | None = None,
     ) -> UserMfaPolicy:
         usr_uuid = _wire_to_uuid(usr_id)
-        with self._conn.cursor() as cur:
-            cur.execute("SELECT id FROM usr WHERE id = %s", (usr_uuid,))
-            if cur.fetchone() is None:
-                raise NotFoundError(f"User {usr_id} not found")
-            cur.execute(
-                """
-                INSERT INTO usr_mfa_policy (usr_id, required, grace_until)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (usr_id) DO UPDATE SET
-                  required = EXCLUDED.required,
-                  grace_until = EXCLUDED.grace_until
-                RETURNING usr_id, required, grace_until, updated_at
-                """,
-                (usr_uuid, required, grace_until),
-            )
-            row = cur.fetchone()
-        self._conn.commit()
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT id FROM usr WHERE id = %s", (usr_uuid,))
+                if cur.fetchone() is None:
+                    raise NotFoundError(f"User {usr_id} not found")
+                cur.execute(
+                    """
+                    INSERT INTO usr_mfa_policy (usr_id, required, grace_until)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (usr_id) DO UPDATE SET
+                      required = EXCLUDED.required,
+                      grace_until = EXCLUDED.grace_until
+                    RETURNING usr_id, required, grace_until, updated_at
+                    """,
+                    (usr_uuid, required, grace_until),
+                )
+                row = cur.fetchone()
         assert row is not None
         return _row_to_policy(row)

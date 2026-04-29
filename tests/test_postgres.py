@@ -397,3 +397,51 @@ def test_set_mfa_policy_upserts(store):
 def test_get_mfa_policy_unknown_user_raises(store):
     with pytest.raises(NotFoundError):
         store.get_mfa_policy(generate("usr"))
+
+
+# ─── Outer-transaction nesting (ADR 0013) ───
+
+def test_create_user_cooperates_with_outer_transaction(store, conn):
+    """Adopter wraps SDK call in conn.transaction(); psycopg3 uses SAVEPOINT."""
+    nested = PostgresIdentityStore(conn)
+    with conn.transaction():
+        user = nested.create_user(display_name="Nested")
+    fetched = store.get_user(user.id)
+    assert fetched.display_name == "Nested"
+
+
+def test_outer_rollback_undoes_inner_create_user_and_credential(store, conn):
+    nested = PostgresIdentityStore(conn)
+    user_id = None
+    try:
+        with conn.transaction():
+            user = nested.create_user()
+            user_id = user.id
+            nested.create_password_credential(
+                user.id, "rolled-back@example.test", "long-enough-password",
+            )
+            raise RuntimeError("force rollback")
+    except RuntimeError:
+        pass
+    with pytest.raises(NotFoundError):
+        store.get_user(user_id)
+
+
+def test_outer_can_commit_after_first_rolls_back_savepoint(store, conn):
+    seed = store.create_user()
+    store.create_password_credential(
+        seed.id, "taken@example.test", "long-enough-password",
+    )
+    with conn.transaction():
+        nested = PostgresIdentityStore(conn)
+        user = nested.create_user()
+        with pytest.raises(DuplicateCredentialError):
+            nested.create_password_credential(
+                user.id, "taken@example.test", "long-enough-password",
+            )
+        # Outer txn still usable — savepoint rolled back the duplicate.
+        cred = nested.create_password_credential(
+            user.id, "survivor@example.test", "long-enough-password",
+        )
+        assert cred.identifier == "survivor@example.test"
+    assert store.get_user(user.id).id == user.id
