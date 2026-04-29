@@ -142,11 +142,13 @@ def _to_bytes(value: Any) -> bytes:
 
 
 def _row_to_user(row: Sequence[Any]) -> User:
+    # Columns: id, status, display_name, created_at, updated_at
     return User(
         id=_encode("usr", str(row[0])),
         status=Status(row[1]),
-        created_at=row[2] if isinstance(row[2], datetime) else datetime.fromisoformat(str(row[2])),
-        updated_at=row[3] if isinstance(row[3], datetime) else datetime.fromisoformat(str(row[3])),
+        display_name=row[2] if row[2] is None else str(row[2]),
+        created_at=row[3] if isinstance(row[3], datetime) else datetime.fromisoformat(str(row[3])),
+        updated_at=row[4] if isinstance(row[4], datetime) else datetime.fromisoformat(str(row[4])),
     )
 
 
@@ -242,7 +244,26 @@ def _row_to_policy(row: Sequence[Any]) -> UserMfaPolicy:
     )
 
 
+class _Unset:
+    """Sentinel for partial-update parameters (ADR 0014)."""
+
+    _instance: "_Unset | None" = None
+
+    def __new__(cls) -> "_Unset":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "_UNSET"
+
+
+_UNSET = _Unset()
+
+
 class PostgresIdentityStore:
+    UNSET: "_Unset" = _UNSET
+
     """Postgres-backed IdentityStore. See module docstring."""
 
     PENDING_FACTOR_TTL_SECONDS = PENDING_FACTOR_TTL_SECONDS
@@ -280,15 +301,15 @@ class PostgresIdentityStore:
 
     # ─── Users ───
 
-    def create_user(self) -> User:
+    def create_user(self, *, display_name: str | None = None) -> User:
         usr_uuid = _decode(_generate("usr")).uuid
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO usr (id) VALUES (%s)
-                RETURNING id, status, created_at, updated_at
+                INSERT INTO usr (id, display_name) VALUES (%s, %s)
+                RETURNING id, status, display_name, created_at, updated_at
                 """,
-                (usr_uuid,),
+                (usr_uuid, display_name),
             )
             row = cur.fetchone()
         self._conn.commit()
@@ -298,7 +319,7 @@ class PostgresIdentityStore:
     def get_user(self, usr_id: str) -> User:
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT id, status, created_at, updated_at FROM usr WHERE id = %s",
+                "SELECT id, status, display_name, created_at, updated_at FROM usr WHERE id = %s",
                 (_wire_to_uuid(usr_id),),
             )
             row = cur.fetchone()
@@ -306,12 +327,62 @@ class PostgresIdentityStore:
             raise NotFoundError(f"User {usr_id} not found")
         return _row_to_user(row)
 
+    def update_user(
+        self,
+        usr_id: str,
+        *,
+        display_name: object = _UNSET,
+    ) -> User:
+        """ADR 0014 partial update of v0.2 user metadata.
+
+        Omitted parameter (sentinel) means "don't change"; explicit
+        ``None`` means "set to null." Suspended users MAY be updated;
+        revoked users raise AlreadyTerminalError.
+        """
+        uuid = _wire_to_uuid(usr_id)
+        with self._tx() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, status, display_name, created_at, updated_at
+                    FROM usr WHERE id = %s FOR UPDATE
+                    """,
+                    (uuid,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError(f"User {usr_id} not found")
+                current_status = row[1]
+                current_display = row[2]
+                if current_status == Status.REVOKED.value:
+                    raise AlreadyTerminalError(
+                        f"User {usr_id} is revoked; cannot update"
+                    )
+                new_display = (
+                    current_display
+                    if isinstance(display_name, _Unset)
+                    else display_name
+                )
+                if new_display == current_display:
+                    return _row_to_user(row)
+                cur.execute(
+                    """
+                    UPDATE usr SET display_name = %s, updated_at = now()
+                    WHERE id = %s
+                    RETURNING id, status, display_name, created_at, updated_at
+                    """,
+                    (new_display, uuid),
+                )
+                updated = cur.fetchone()
+        assert updated is not None
+        return _row_to_user(updated)
+
     def suspend_user(self, usr_id: str) -> User:
         with self._tx() as conn:
             uuid = _wire_to_uuid(usr_id)
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, status, created_at, updated_at FROM usr WHERE id = %s FOR UPDATE",
+                    "SELECT id, status, display_name, created_at, updated_at FROM usr WHERE id = %s FOR UPDATE",
                     (uuid,),
                 )
                 row = cur.fetchone()
@@ -323,7 +394,7 @@ class PostgresIdentityStore:
                     return _row_to_user(row)
                 cur.execute(
                     "UPDATE usr SET status = 'suspended' WHERE id = %s "
-                    "RETURNING id, status, created_at, updated_at",
+                    "RETURNING id, status, display_name, created_at, updated_at",
                     (uuid,),
                 )
                 updated = cur.fetchone()
@@ -339,7 +410,7 @@ class PostgresIdentityStore:
             uuid = _wire_to_uuid(usr_id)
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, status, created_at, updated_at FROM usr WHERE id = %s FOR UPDATE",
+                    "SELECT id, status, display_name, created_at, updated_at FROM usr WHERE id = %s FOR UPDATE",
                     (uuid,),
                 )
                 row = cur.fetchone()
@@ -352,7 +423,7 @@ class PostgresIdentityStore:
                     )
                 cur.execute(
                     "UPDATE usr SET status = 'active' WHERE id = %s "
-                    "RETURNING id, status, created_at, updated_at",
+                    "RETURNING id, status, display_name, created_at, updated_at",
                     (uuid,),
                 )
                 updated = cur.fetchone()
@@ -364,7 +435,7 @@ class PostgresIdentityStore:
             uuid = _wire_to_uuid(usr_id)
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, status, created_at, updated_at FROM usr WHERE id = %s FOR UPDATE",
+                    "SELECT id, status, display_name, created_at, updated_at FROM usr WHERE id = %s FOR UPDATE",
                     (uuid,),
                 )
                 row = cur.fetchone()
@@ -383,7 +454,7 @@ class PostgresIdentityStore:
                 )
                 cur.execute(
                     "UPDATE usr SET status = 'revoked' WHERE id = %s "
-                    "RETURNING id, status, created_at, updated_at",
+                    "RETURNING id, status, display_name, created_at, updated_at",
                     (uuid,),
                 )
                 updated = cur.fetchone()

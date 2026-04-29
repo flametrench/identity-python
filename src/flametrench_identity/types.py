@@ -55,6 +55,8 @@ class User:
     status: Status
     created_at: datetime
     updated_at: datetime
+    #: ADR 0014 (v0.2) — optional human-meaningful render string.
+    display_name: str | None = None
 
     def with_status(self, status: Status, updated_at: datetime) -> "User":
         return User(
@@ -62,6 +64,7 @@ class User:
             status=status,
             created_at=self.created_at,
             updated_at=updated_at,
+            display_name=self.display_name,
         )
 
 

@@ -66,6 +66,49 @@ class TestUserLifecycle:
             store.revoke_user(u.id)
 
 
+class TestDisplayName:
+    """ADR 0014 — optional User.display_name and update_user."""
+
+    def test_create_with_display_name(self, store: InMemoryIdentityStore) -> None:
+        u = store.create_user(display_name="Alice")
+        assert u.display_name == "Alice"
+        assert store.get_user(u.id).display_name == "Alice"
+
+    def test_create_default_null(self, store: InMemoryIdentityStore) -> None:
+        u = store.create_user()
+        assert u.display_name is None
+
+    def test_update_set_noop_clear(self, store: InMemoryIdentityStore) -> None:
+        u = store.create_user(display_name="Original")
+        renamed = store.update_user(u.id, display_name="Renamed")
+        assert renamed.display_name == "Renamed"
+        # Omitted = no change.
+        unchanged = store.update_user(u.id)
+        assert unchanged.display_name == "Renamed"
+        # Explicit None = clear.
+        cleared = store.update_user(u.id, display_name=None)
+        assert cleared.display_name is None
+
+    def test_update_allows_rename_while_suspended(
+        self, store: InMemoryIdentityStore
+    ) -> None:
+        u = store.create_user(display_name="Before")
+        store.suspend_user(u.id)
+        renamed = store.update_user(u.id, display_name="After")
+        assert renamed.display_name == "After"
+        assert renamed.status == Status.SUSPENDED
+
+    def test_update_revoked_rejected(self, store: InMemoryIdentityStore) -> None:
+        u = store.create_user()
+        store.revoke_user(u.id)
+        with pytest.raises(AlreadyTerminalError):
+            store.update_user(u.id, display_name="Whatever")
+
+    def test_unicode_round_trip(self, store: InMemoryIdentityStore) -> None:
+        u = store.create_user(display_name="山田 太郎")
+        assert store.get_user(u.id).display_name == "山田 太郎"
+
+
 class TestPasswordCredential:
     def test_create_then_verify_round_trip(
         self, store: InMemoryIdentityStore

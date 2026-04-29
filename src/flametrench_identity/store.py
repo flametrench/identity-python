@@ -33,8 +33,22 @@ from .types import (
 @runtime_checkable
 class IdentityStore(Protocol):
     # ─── Users ───
-    def create_user(self) -> User: ...
+    def create_user(self, *, display_name: str | None = None) -> User: ...
     def get_user(self, usr_id: str) -> User: ...
+    def update_user(
+        self,
+        usr_id: str,
+        *,
+        display_name: object = ...,
+    ) -> User:
+        """ADR 0014 partial update of v0.2 user metadata.
+
+        Omitted parameter (sentinel) means "don't change"; explicit
+        ``None`` means "set to null." Implementations export the
+        sentinel as a module-level constant for callers that need to
+        forward partial inputs.
+        """
+        ...
     def suspend_user(self, usr_id: str) -> User: ...
     def reinstate_user(self, usr_id: str) -> User: ...
     def revoke_user(self, usr_id: str) -> User: ...

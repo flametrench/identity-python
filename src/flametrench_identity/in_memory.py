@@ -84,8 +84,28 @@ def _hash_token(token: str) -> str:
     return sha256(token.encode("utf-8")).hexdigest()
 
 
+class _Unset:
+    """Sentinel for partial-update parameters (ADR 0014). Distinguishes
+    "field omitted" from an explicit "set to None"."""
+
+    _instance: "_Unset | None" = None
+
+    def __new__(cls) -> "_Unset":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "_UNSET"
+
+
+_UNSET = _Unset()
+
+
 class InMemoryIdentityStore:
     """Reference in-memory implementation of IdentityStore."""
+
+    UNSET: "_Unset" = _UNSET
 
     def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
         self._users: dict[str, User] = {}
@@ -211,14 +231,55 @@ class InMemoryIdentityStore:
 
     # ─── Users ───
 
-    def create_user(self) -> User:
+    def create_user(self, *, display_name: str | None = None) -> User:
         now = self._now()
-        u = User(id=generate("usr"), status=Status.ACTIVE, created_at=now, updated_at=now)
+        u = User(
+            id=generate("usr"),
+            status=Status.ACTIVE,
+            created_at=now,
+            updated_at=now,
+            display_name=display_name,
+        )
         self._users[u.id] = u
         return u
 
     def get_user(self, usr_id: str) -> User:
         return self._require_user(usr_id)
+
+    def update_user(
+        self,
+        usr_id: str,
+        *,
+        display_name: str | None | _Unset = _UNSET,
+    ) -> User:
+        """Partial update of v0.2 user metadata.
+
+        ADR 0014 semantics: an omitted parameter (sentinel ``_UNSET``)
+        means "don't change"; an explicit ``None`` means "set to null."
+        Returns the updated user. Raises:
+
+        - :class:`AlreadyTerminalError` if the user is revoked.
+        - :class:`NotFoundError` if the user does not exist.
+        """
+        u = self._require_user(usr_id)
+        if u.status == Status.REVOKED:
+            raise AlreadyTerminalError(
+                f"User {usr_id} is revoked; cannot update"
+            )
+        new_display_name = (
+            u.display_name if isinstance(display_name, _Unset) else display_name
+        )
+        if new_display_name == u.display_name:
+            return u
+        updated = User(
+            id=u.id,
+            status=u.status,
+            created_at=u.created_at,
+            updated_at=self._now(),
+            display_name=new_display_name,
+        )
+        self._users[usr_id] = updated
+        return updated
 
     def suspend_user(self, usr_id: str) -> User:
         u = self._require_user(usr_id)

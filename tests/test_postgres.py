@@ -114,6 +114,54 @@ def test_double_revoke_rejected(store):
         store.revoke_user(u.id)
 
 
+# ─── display_name (ADR 0014) ───
+
+def test_create_user_with_display_name(store):
+    u = store.create_user(display_name="Alice")
+    assert u.display_name == "Alice"
+    assert store.get_user(u.id).display_name == "Alice"
+
+
+def test_create_user_default_display_name_null(store):
+    u = store.create_user()
+    assert u.display_name is None
+
+
+def test_update_user_set_noop_clear(store):
+    u = store.create_user(display_name="Original")
+    renamed = store.update_user(u.id, display_name="Renamed")
+    assert renamed.display_name == "Renamed"
+    unchanged = store.update_user(u.id)
+    assert unchanged.display_name == "Renamed"
+    cleared = store.update_user(u.id, display_name=None)
+    assert cleared.display_name is None
+
+
+def test_update_user_allows_rename_while_suspended(store):
+    u = store.create_user(display_name="Before")
+    store.suspend_user(u.id)
+    renamed = store.update_user(u.id, display_name="After")
+    assert renamed.display_name == "After"
+    assert renamed.status == Status.SUSPENDED
+
+
+def test_update_user_revoked_rejected(store):
+    u = store.create_user()
+    store.revoke_user(u.id)
+    with pytest.raises(AlreadyTerminalError):
+        store.update_user(u.id, display_name="Whatever")
+
+
+def test_update_user_unknown_rejected(store):
+    with pytest.raises(NotFoundError):
+        store.update_user(generate("usr"), display_name="ghost")
+
+
+def test_display_name_unicode_round_trip(store):
+    u = store.create_user(display_name="山田 太郎")
+    assert store.get_user(u.id).display_name == "山田 太郎"
+
+
 # ─── Credentials ───
 
 def test_password_credential_round_trip(store):
