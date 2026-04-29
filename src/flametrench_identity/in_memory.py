@@ -281,6 +281,47 @@ class InMemoryIdentityStore:
         self._users[usr_id] = updated
         return updated
 
+    def list_users(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        query: str | None = None,
+        status: Status | None = None,
+    ) -> Page[User]:
+        limit = max(1, min(limit, 200))
+        needle = query.lower() if query is not None else None
+        matching: list[User] = []
+        for u in self._users.values():
+            if status is not None and u.status != status:
+                continue
+            if needle is not None:
+                hit = False
+                for cred in self._credentials.values():
+                    if cred.usr_id != u.id:
+                        continue
+                    if cred.status != Status.ACTIVE:
+                        continue
+                    if needle in cred.identifier.lower():
+                        hit = True
+                        break
+                if not hit:
+                    continue
+            matching.append(u)
+        matching.sort(key=lambda u: u.id)
+        if cursor is not None:
+            start = next(
+                (i for i, u in enumerate(matching) if u.id > cursor),
+                len(matching),
+            )
+        else:
+            start = 0
+        page = matching[start : start + limit]
+        next_cursor = (
+            page[-1].id if start + limit < len(matching) and page else None
+        )
+        return Page(data=page, next_cursor=next_cursor)
+
     def suspend_user(self, usr_id: str) -> User:
         u = self._require_user(usr_id)
         if u.status == Status.REVOKED:

@@ -114,6 +114,64 @@ def test_double_revoke_rejected(store):
         store.revoke_user(u.id)
 
 
+# ─── listUsers (ADR 0015) ───
+
+def test_list_users_id_ordered(store):
+    a = store.create_user()
+    b = store.create_user()
+    c = store.create_user()
+    page = store.list_users()
+    assert [u.id for u in page.data] == [a.id, b.id, c.id]
+    assert page.next_cursor is None
+
+
+def test_list_users_status_filter(store):
+    active = store.create_user()
+    suspended = store.create_user()
+    store.suspend_user(suspended.id)
+    page = store.list_users(status=Status.ACTIVE)
+    assert [u.id for u in page.data] == [active.id]
+
+
+def test_list_users_query_case_insensitive(store):
+    alice = store.create_user()
+    store.create_password_credential(alice.id, "alice@example.com", "long-enough-password")
+    bob = store.create_user()
+    store.create_password_credential(bob.id, "bob@example.com", "long-enough-password")
+    carol = store.create_user()
+    store.create_password_credential(carol.id, "carol@other.test", "long-enough-password")
+    page = store.list_users(query="EXAMPLE")
+    assert {u.id for u in page.data} == {alice.id, bob.id}
+
+
+def test_list_users_query_skips_revoked_credentials(store):
+    alice = store.create_user()
+    cred = store.create_password_credential(alice.id, "gone@example.com", "long-enough-password")
+    store.revoke_credential(cred.id)
+    page = store.list_users(query="gone@example.com")
+    assert page.data == []
+
+
+def test_list_users_cursor_walks_pages(store):
+    ids = [store.create_user().id for _ in range(5)]
+    page1 = store.list_users(limit=2)
+    assert [u.id for u in page1.data] == [ids[0], ids[1]]
+    page2 = store.list_users(cursor=page1.next_cursor, limit=2)
+    assert [u.id for u in page2.data] == [ids[2], ids[3]]
+    page3 = store.list_users(cursor=page2.next_cursor, limit=2)
+    assert [u.id for u in page3.data] == [ids[4]]
+    assert page3.next_cursor is None
+
+
+def test_list_users_returns_display_name(store):
+    alice = store.create_user(display_name="Alice")
+    bob = store.create_user()
+    page = store.list_users()
+    by_id = {u.id: u.display_name for u in page.data}
+    assert by_id[alice.id] == "Alice"
+    assert by_id[bob.id] is None
+
+
 # ─── display_name (ADR 0014) ───
 
 def test_create_user_with_display_name(store):

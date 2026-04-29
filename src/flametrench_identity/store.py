@@ -25,6 +25,7 @@ from .types import (
     PasswordCredential,
     Session,
     SessionWithToken,
+    Status,
     User,
     VerifiedCredential,
 )
@@ -47,6 +48,24 @@ class IdentityStore(Protocol):
         ``None`` means "set to null." Implementations export the
         sentinel as a module-level constant for callers that need to
         forward partial inputs.
+        """
+        ...
+    def list_users(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        query: str | None = None,
+        status: "Status | None" = None,
+    ) -> "Page[User]":
+        """ADR 0015 — paginated user enumeration.
+
+        Adopters MUST gate the call site (sysadmin route or equivalent);
+        the SDK does not enforce authorization. Cursor and ordering match
+        ``TenancyStore.list_members``.
+
+        ``query`` is a case-insensitive substring filter against active
+        credential identifiers; ``status`` filters by user status.
         """
         ...
     def suspend_user(self, usr_id: str) -> User: ...

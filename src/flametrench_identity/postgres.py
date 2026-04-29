@@ -377,6 +377,50 @@ class PostgresIdentityStore:
         assert updated is not None
         return _row_to_user(updated)
 
+    def list_users(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        query: str | None = None,
+        status: Status | None = None,
+    ) -> Page[User]:
+        limit = max(1, min(limit, 200))
+        sql = (
+            "SELECT id, status, display_name, created_at, updated_at "
+            "FROM usr WHERE 1=1"
+        )
+        params: list[Any] = []
+        if cursor is not None:
+            sql += " AND id > %s"
+            params.append(_wire_to_uuid(cursor))
+        if status is not None:
+            sql += " AND status = %s"
+            params.append(status.value)
+        if query is not None:
+            sql += (
+                " AND EXISTS ("
+                "  SELECT 1 FROM cred"
+                "  WHERE cred.usr_id = usr.id"
+                "    AND cred.status = 'active'"
+                "    AND cred.identifier ILIKE %s"
+                ")"
+            )
+            escaped = (
+                query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            params.append(f"%{escaped}%")
+        sql += " ORDER BY id LIMIT %s"
+        params.append(limit + 1)
+        with self._conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        users = [_row_to_user(r) for r in rows[:limit]]
+        next_cursor = (
+            users[-1].id if len(rows) > limit and users else None
+        )
+        return Page(data=users, next_cursor=next_cursor)
+
     def suspend_user(self, usr_id: str) -> User:
         with self._tx() as conn:
             uuid = _wire_to_uuid(usr_id)

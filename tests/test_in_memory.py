@@ -66,6 +66,59 @@ class TestUserLifecycle:
             store.revoke_user(u.id)
 
 
+class TestListUsers:
+    """ADR 0015 — paginated user enumeration."""
+
+    def test_returns_users_in_id_asc_order(self, store: InMemoryIdentityStore) -> None:
+        a = store.create_user()
+        b = store.create_user()
+        c = store.create_user()
+        page = store.list_users()
+        assert [u.id for u in page.data] == [a.id, b.id, c.id]
+        assert page.next_cursor is None
+
+    def test_status_filter_excludes_other_states(
+        self, store: InMemoryIdentityStore
+    ) -> None:
+        active = store.create_user()
+        suspended = store.create_user()
+        store.suspend_user(suspended.id)
+        page = store.list_users(status=Status.ACTIVE)
+        assert [u.id for u in page.data] == [active.id]
+
+    def test_query_case_insensitive_substring(
+        self, store: InMemoryIdentityStore
+    ) -> None:
+        alice = store.create_user()
+        store.create_password_credential(alice.id, "alice@example.com", "long-enough-password")
+        bob = store.create_user()
+        store.create_password_credential(bob.id, "bob@example.com", "long-enough-password")
+        carol = store.create_user()
+        store.create_password_credential(carol.id, "carol@other.test", "long-enough-password")
+        page = store.list_users(query="EXAMPLE")
+        assert {u.id for u in page.data} == {alice.id, bob.id}
+
+    def test_cursor_walks_pages(self, store: InMemoryIdentityStore) -> None:
+        ids = [store.create_user().id for _ in range(5)]
+        page1 = store.list_users(limit=2)
+        assert [u.id for u in page1.data] == [ids[0], ids[1]]
+        page2 = store.list_users(cursor=page1.next_cursor, limit=2)
+        assert [u.id for u in page2.data] == [ids[2], ids[3]]
+        page3 = store.list_users(cursor=page2.next_cursor, limit=2)
+        assert [u.id for u in page3.data] == [ids[4]]
+        assert page3.next_cursor is None
+
+    def test_returns_display_name_on_each_row(
+        self, store: InMemoryIdentityStore
+    ) -> None:
+        alice = store.create_user(display_name="Alice")
+        bob = store.create_user()
+        page = store.list_users()
+        by_id = {u.id: u.display_name for u in page.data}
+        assert by_id[alice.id] == "Alice"
+        assert by_id[bob.id] is None
+
+
 class TestDisplayName:
     """ADR 0014 — optional User.display_name and update_user."""
 
