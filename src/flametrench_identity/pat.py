@@ -77,3 +77,9 @@ class VerifiedPat:
     pat_id: str
     usr_id: str
     scope: list[str]
+
+
+# Spec floor: PAT ``expires_at`` MUST be no more than 365 days from
+# ``created_at`` when set (ADR 0016 §"Constraints"). Implementations
+# MAY enforce a tighter cap. 365 days = 31,536,000 seconds.
+PAT_MAX_LIFETIME_SECONDS = 365 * 24 * 60 * 60

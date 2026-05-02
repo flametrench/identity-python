@@ -113,6 +113,26 @@ def test_in_memory_create_pat_rejects_past_expiry(
         )
 
 
+# security-audit-v0.3.md H1: ADR 0016 §"Constraints" caps expires_at at
+# 365 days from creation. Pre-fix this was unenforced.
+def test_in_memory_create_pat_accepts_expiry_at_cap(
+    in_memory: InMemoryIdentityStore, clock: _Clock,
+) -> None:
+    u = in_memory.create_user()
+    exp = clock.now + timedelta(days=365)
+    pat, _ = in_memory.create_pat(u.id, "cli", [], expires_at=exp)
+    assert pat.expires_at == exp
+
+
+def test_in_memory_create_pat_rejects_expiry_beyond_cap(
+    in_memory: InMemoryIdentityStore, clock: _Clock,
+) -> None:
+    u = in_memory.create_user()
+    exp = clock.now + timedelta(days=365, seconds=1)
+    with pytest.raises(PreconditionError):
+        in_memory.create_pat(u.id, "cli", [], expires_at=exp)
+
+
 def test_in_memory_create_pat_refuses_revoked_user(
     in_memory: InMemoryIdentityStore,
 ) -> None:

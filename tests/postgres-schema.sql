@@ -331,9 +331,15 @@ CREATE INDEX inv_pending_idx  ON inv (identifier) WHERE status = 'pending';
 -- implication, no inheritance, no rewrite rules. Those are deferred to
 -- v0.2+ once real usage tells us which derivations matter.
 --
--- subject_type is constrained to 'usr' in v0.1. 'grp' (groups) is a
--- v0.2+ subject type and will allow group-subject tuples to expand to
--- individual members at check time.
+-- subject_type was constrained to 'usr' in v0.1. v0.3 (ADR 0017) relaxes
+-- the constraint to the same `^[a-z]{2,6}$` shape used by object_type:
+-- `tuple_to_userset` rewrite rules (ADR 0007) require object→object
+-- tuples (e.g. `(org_X, parent_org, proj_Y)` where the subject is an
+-- `org_`), which the v0.1/v0.2 constraint silently blocked. The
+-- application contract still recommends 'usr' for principal-grant
+-- tuples; non-'usr' subject_types are reserved for the
+-- `tuple_to_userset` hop pattern. Group-subject expansion ('grp') and
+-- per-prefix authz are still future work.
 --
 -- object_type is unconstrained at the type level: applications freely
 -- tup custom object types (e.g. 'project', 'doc'). The format pattern
@@ -342,7 +348,7 @@ CREATE INDEX inv_pending_idx  ON inv (identifier) WHERE status = 'pending';
 CREATE TABLE tup (
     id            UUID PRIMARY KEY,
     subject_type  TEXT NOT NULL
-                    CHECK (subject_type IN ('usr')),
+                    CHECK (subject_type ~ '^[a-z]{2,6}$'),
     subject_id    UUID NOT NULL,
     relation      TEXT NOT NULL
                     CHECK (relation ~ '^[a-z_]{2,32}$'),

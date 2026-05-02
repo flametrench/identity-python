@@ -45,7 +45,7 @@ from .errors import (
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
-from .pat import PatStatus, PersonalAccessToken, VerifiedPat
+from .pat import PAT_MAX_LIFETIME_SECONDS, PatStatus, PersonalAccessToken, VerifiedPat
 from .mfa import (
     DEFAULT_TOTP_ALGORITHM,
     DEFAULT_TOTP_DIGITS,
@@ -1511,6 +1511,15 @@ class PostgresIdentityStore:
             raise PreconditionError(
                 "PAT expires_at must be strictly in the future",
                 reason="pat.expires_in_past",
+            )
+        # security-audit-v0.3.md H1: 365-day cap from ADR 0016 §"Constraints".
+        if (
+            expires_at is not None
+            and (expires_at - now).total_seconds() > PAT_MAX_LIFETIME_SECONDS
+        ):
+            raise PreconditionError(
+                f"PAT expires_at exceeds the spec cap of {PAT_MAX_LIFETIME_SECONDS} seconds (365 days) from creation",
+                reason="pat.expires_too_far",
             )
         with self._conn.transaction():
             with self._conn.cursor() as cur:
