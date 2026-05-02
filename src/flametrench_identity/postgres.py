@@ -1693,7 +1693,11 @@ class PostgresIdentityStore:
         if should_update:
             with self._conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE pat SET last_used_at = %s WHERE id = %s",
+                    # security-audit-v0.3.md H3: re-check revoked_at IS NULL
+                    # so a race with revoke_pat does not write last_used_at
+                    # onto an already-revoked row.
+                    "UPDATE pat SET last_used_at = %s "
+                    "WHERE id = %s AND revoked_at IS NULL",
                     (now, pat_uuid),
                 )
         return VerifiedPat(
