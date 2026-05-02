@@ -108,3 +108,39 @@ PAT_DUMMY_PHC_HASH = (
 # are 43 chars (32 random bytes base64url-encoded); 256 leaves a
 # generous margin while bounding the attack.
 PAT_MAX_SECRET_LENGTH = 256
+
+
+# security-audit-v0.3.md M5 — conformance helpers consumed by every
+# SDK's bearer-prefix-routing and token-format fixture loader. The
+# regex MUST match the Node SDK's ``PAT_WIRE_FORMAT`` byte-for-byte:
+# ``pat_`` + 32 lowercase hex + ``_`` + non-empty base64url secret.
+import re as _re
+
+_PAT_WIRE_FORMAT = _re.compile(r"^pat_[0-9a-f]{32}_[A-Za-z0-9_-]+$")
+
+
+def is_structurally_valid_pat_token(token: str) -> bool:
+    """Pure structural validation per ADR 0016 §"Wire format".
+
+    Returns ``True`` if ``token`` matches ``pat_<32hex>_<base64url>``.
+    Does NOT hit the database or Argon2id verifier — adopters that
+    pre-screen bearers before dispatch can use this to short-circuit
+    obviously-bogus PATs.
+    """
+    return bool(_PAT_WIRE_FORMAT.match(token))
+
+
+def classify_bearer(token: str) -> str:
+    """Pure prefix classifier per ADR 0016 §"Bearer routing".
+
+    Returns the ``auth.kind`` discriminator (``"pat"``, ``"share"``,
+    or ``"session"``) without invoking any verifier or DB lookup. The
+    cross-SDK conformance contract — see
+    ``spec/conformance/fixtures/identity/pat/bearer-prefix-routing.json``
+    — pins the rules every SDK MUST produce identically.
+    """
+    if token.startswith("pat_"):
+        return "pat"
+    if token.startswith("shr_"):
+        return "share"
+    return "session"

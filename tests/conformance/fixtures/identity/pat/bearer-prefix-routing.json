@@ -1,0 +1,59 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.3.0",
+  "capability": "identity",
+  "operation": "resolve_bearer",
+  "conformance_level": "MUST",
+  "spec_section": "decisions/0016-personal-access-tokens.md#bearer-routing",
+  "description": "Bearer-prefix dispatch contract per ADR 0016. v0.3 broadens what an `Authorization: Bearer` header may carry — session tokens (v0.1), share tokens (v0.2 / ADR 0012), and personal access tokens (v0.3). Adopters that compose multiple bearer types in one middleware MUST classify each candidate by its prefix and dispatch to the matching verifier. The `auth.kind` audit discriminator returns one of {`pat`, `share`, `session`}; sessions are the default for any bearer that does NOT carry a registered Flametrench prefix (session tokens have no spec-pinned prefix — they are opaque strings, often random or JWT-shaped). Bearer types do NOT overlap: a `pat_…` string MUST NOT be retried against the session resolver if PAT verification fails, and vice versa. The classification is what every conforming SDK MUST produce identically — interop depends on byte-equivalent prefix dispatch.",
+  "tests": [
+    {
+      "id": "pat.bearer-routing.pat-prefix",
+      "description": "A `pat_<32hex>_<…>` bearer routes to the PAT verifier.",
+      "input": {
+        "token": "pat_0190f2a81b3c7abc8123456789abcdef_secretSegmentHere"
+      },
+      "expected": { "result": "pat" }
+    },
+    {
+      "id": "pat.bearer-routing.share-prefix",
+      "description": "A `shr_<…>` bearer routes to the share verifier (ADR 0012).",
+      "input": {
+        "token": "shr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_someShareSecret"
+      },
+      "expected": { "result": "share" }
+    },
+    {
+      "id": "pat.bearer-routing.session-opaque-token",
+      "description": "Session tokens have no spec-pinned prefix — adopters typically use opaque random strings. Any bearer that does not match a registered prefix (`pat_`, `shr_`) routes to the session resolver. The classifier MUST default to `session`; the session resolver itself rejects invalid sessions with InvalidTokenError.",
+      "input": {
+        "token": "G7Pc1xqVz4nN8mYf2tWbE3kLjRsT5vUaB6cD9eFgHiJk"
+      },
+      "expected": { "result": "session" }
+    },
+    {
+      "id": "pat.bearer-routing.session-jwt-shape",
+      "description": "A JWT-shaped bearer (three base64url-encoded segments, dot-separated) routes to `session`. The PAT classifier MUST NOT consume tokens just because they happen to start with letters before a dot.",
+      "input": {
+        "token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signaturepart"
+      },
+      "expected": { "result": "session" }
+    },
+    {
+      "id": "pat.bearer-routing.no-cross-routing-malformed-pat",
+      "description": "Critical no-cross-routing invariant: a malformed `pat_…` string (here, missing the secret segment) MUST classify as `pat` and let the PAT verifier reject it. The classifier MUST NOT fall back to the session resolver — that would mask the real error and silently mis-categorize the audit `auth.kind`.",
+      "input": {
+        "token": "pat_0190f2a81b3c7abc8123456789abcdef"
+      },
+      "expected": { "result": "pat" }
+    },
+    {
+      "id": "pat.bearer-routing.no-cross-routing-malformed-share",
+      "description": "Same invariant for share tokens — a `shr_…` string with broken structure classifies as `share` and lets the share verifier reject it. Cross-routing is forbidden.",
+      "input": {
+        "token": "shr_garbage"
+      },
+      "expected": { "result": "share" }
+    }
+  ]
+}

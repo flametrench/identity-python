@@ -22,7 +22,11 @@ from typing import Any
 
 import pytest
 
-from flametrench_identity import verify_password_hash
+from flametrench_identity import (
+    classify_bearer,
+    is_structurally_valid_pat_token,
+    verify_password_hash,
+)
 
 _FIXTURES_DIR = Path(__file__).parent / "conformance" / "fixtures"
 
@@ -43,3 +47,26 @@ def test_verify_password_conformance(test_case: dict[str, Any]) -> None:
     expected = test_case["expected"]["result"]
     result = verify_password_hash(inp["phc_hash"], inp["candidate_password"])
     assert result is expected
+
+
+# v0.3 — security-audit-v0.3.md M5: every SDK consumes the PAT fixtures.
+
+
+@pytest.mark.parametrize("test_case", _params("identity/pat/token-format.json"))
+def test_pat_token_format_conformance(test_case: dict[str, Any]) -> None:
+    """ADR 0016 §"Wire format" — structural validation MUST classify
+    every fixture token identically across SDKs."""
+    assert (
+        is_structurally_valid_pat_token(test_case["input"]["token"])
+        is test_case["expected"]["result"]
+    )
+
+
+@pytest.mark.parametrize("test_case", _params("identity/pat/bearer-prefix-routing.json"))
+def test_pat_bearer_routing_conformance(test_case: dict[str, Any]) -> None:
+    """ADR 0016 §"Bearer routing" — the auth.kind classifier MUST agree
+    across SDKs on every fixture token."""
+    assert (
+        classify_bearer(test_case["input"]["token"])
+        == test_case["expected"]["result"]
+    )

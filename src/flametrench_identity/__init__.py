@@ -29,7 +29,16 @@ from .errors import (
 )
 from .hashing import hash_password, verify_password_hash
 from .in_memory import InMemoryIdentityStore
-from .pat import PatStatus, PersonalAccessToken, VerifiedPat
+from .pat import (
+    PAT_DUMMY_PHC_HASH,
+    PAT_MAX_LIFETIME_SECONDS,
+    PAT_MAX_SECRET_LENGTH,
+    PatStatus,
+    PersonalAccessToken,
+    VerifiedPat,
+    classify_bearer,
+    is_structurally_valid_pat_token,
+)
 from .mfa import (
     DEFAULT_TOTP_ALGORITHM,
     DEFAULT_TOTP_DIGITS,
@@ -163,11 +172,16 @@ __all__ = [
     "webauthn_verify_assertion",
     # v0.3 — Personal access tokens (Proposed; ADR 0016)
     "InvalidPatTokenError",
+    "PAT_DUMMY_PHC_HASH",
+    "PAT_MAX_LIFETIME_SECONDS",
+    "PAT_MAX_SECRET_LENGTH",
     "PatExpiredError",
     "PatRevokedError",
     "PatStatus",
     "PersonalAccessToken",
     "VerifiedPat",
+    "classify_bearer",
+    "is_structurally_valid_pat_token",
 ]
 
 __version__ = "0.3.0"

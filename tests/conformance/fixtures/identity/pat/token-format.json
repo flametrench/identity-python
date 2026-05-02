@@ -1,0 +1,97 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.3.0",
+  "capability": "identity",
+  "operation": "verify_pat_token",
+  "conformance_level": "MUST",
+  "spec_section": "docs/identity.md#wire-format",
+  "description": "Wire-format structural validation for PAT bearer tokens (ADR 0016). The format is `pat_<32hex-id>_<base64url-secret>` — a `pat_` prefix, exactly 32 lowercase hex characters for the id segment, an underscore separator, then a non-empty RFC 4648 §5 base64url-encoded secret with no padding. Every conforming SDK MUST classify these candidate strings identically when their `verify_pat_token` (or equivalent) starts with structural decoding. Tokens that pass structural validation may still fail at the lookup / secret-verify step; tokens that fail structural validation MUST short-circuit to `InvalidPatTokenError` (or the language equivalent) without any DB hit — both for performance and for the timing-oracle guarantee.",
+  "tests": [
+    {
+      "id": "pat.token-format.well-formed-min-secret",
+      "description": "Minimum well-formed shape: pat_ + 32 hex + _ + 1 base64url char. Structural validation MUST accept (the secret will fail Argon2id verify, but that is the lookup step's concern, not structure).",
+      "input": {
+        "token": "pat_0190f2a81b3c7abc8123456789abcdef_x"
+      },
+      "expected": { "result": true }
+    },
+    {
+      "id": "pat.token-format.well-formed-typical",
+      "description": "Typical 32-byte secret: 43-char base64url (32 bytes × 8 bits / 6 bits per char = 42.67 → 43 chars no padding).",
+      "input": {
+        "token": "pat_0190f2a81b3c7abc8123456789abcdef_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_aBcDe"
+      },
+      "expected": { "result": true }
+    },
+    {
+      "id": "pat.token-format.rejects-empty-string",
+      "description": "Empty bearer is structurally invalid.",
+      "input": { "token": "" },
+      "expected": { "result": false }
+    },
+    {
+      "id": "pat.token-format.rejects-wrong-prefix",
+      "description": "A token with the share-token prefix MUST NOT be classified as a PAT — even though the same SDK may also handle share tokens. Prefix-routing is exclusive (per ADR 0016 §\"Bearer routing\"); cross-routing is a security defect.",
+      "input": {
+        "token": "shr_0190f2a81b3c7abc8123456789abcdef_someSecretValue"
+      },
+      "expected": { "result": false }
+    },
+    {
+      "id": "pat.token-format.rejects-no-prefix",
+      "description": "A bare hex string with no prefix is structurally invalid — PATs are always prefixed.",
+      "input": {
+        "token": "0190f2a81b3c7abc8123456789abcdef_someSecretValue"
+      },
+      "expected": { "result": false }
+    },
+    {
+      "id": "pat.token-format.rejects-uppercase-hex",
+      "description": "The id segment MUST be lowercase hex. Uppercase or mixed case is structurally invalid; the Flametrench wire-format spec (docs/ids.md) is normative on lowercase.",
+      "input": {
+        "token": "pat_0190F2A81B3C7ABC8123456789ABCDEF_secret"
+      },
+      "expected": { "result": false }
+    },
+    {
+      "id": "pat.token-format.rejects-short-id",
+      "description": "Id segment shorter than 32 hex chars is structurally invalid.",
+      "input": {
+        "token": "pat_0190f2a81b3c_secret"
+      },
+      "expected": { "result": false }
+    },
+    {
+      "id": "pat.token-format.rejects-long-id",
+      "description": "Id segment longer than 32 hex chars is structurally invalid (the underscore at position 36 is the contract).",
+      "input": {
+        "token": "pat_0190f2a81b3c7abc8123456789abcdef00_secret"
+      },
+      "expected": { "result": false }
+    },
+    {
+      "id": "pat.token-format.rejects-missing-separator",
+      "description": "No underscore separator between id and secret — structurally invalid.",
+      "input": {
+        "token": "pat_0190f2a81b3c7abc8123456789abcdefxsecret"
+      },
+      "expected": { "result": false }
+    },
+    {
+      "id": "pat.token-format.rejects-empty-secret",
+      "description": "Trailing separator with no secret — structurally invalid.",
+      "input": {
+        "token": "pat_0190f2a81b3c7abc8123456789abcdef_"
+      },
+      "expected": { "result": false }
+    },
+    {
+      "id": "pat.token-format.rejects-non-hex-id",
+      "description": "Non-hex characters in the id segment — structurally invalid.",
+      "input": {
+        "token": "pat_g190f2a81b3c7abc8123456789abcdef_secret"
+      },
+      "expected": { "result": false }
+    }
+  ]
+}
