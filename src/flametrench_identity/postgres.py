@@ -20,7 +20,9 @@ psycopg3 connection — ``cursor()``, ``commit()``, ``rollback()``.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import re
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -34,12 +36,16 @@ from .errors import (
     CredentialTypeMismatchError,
     DuplicateCredentialError,
     InvalidCredentialError,
+    InvalidPatTokenError,
     InvalidTokenError,
     NotFoundError,
+    PatExpiredError,
+    PatRevokedError,
     PreconditionError,
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
+from .pat import PatStatus, PersonalAccessToken, VerifiedPat
 from .mfa import (
     DEFAULT_TOTP_ALGORITHM,
     DEFAULT_TOTP_DIGITS,
@@ -273,9 +279,11 @@ class PostgresIdentityStore:
         connection: Any,
         *,
         clock: Callable[[], datetime] | None = None,
+        pat_last_used_coalesce_seconds: int = 60,
     ) -> None:
         self._conn = connection
         self._clock = clock or _default_clock
+        self._pat_last_used_coalesce_seconds = max(0, pat_last_used_coalesce_seconds)
 
     def _now(self) -> datetime:
         return self._clock()
@@ -1476,3 +1484,233 @@ class PostgresIdentityStore:
                 row = cur.fetchone()
         assert row is not None
         return _row_to_policy(row)
+
+    # ─── v0.3 personal access tokens (ADR 0016) ───
+
+    _PAT_COLS = (
+        "id, usr_id, name, scope, secret_hash, expires_at, last_used_at, "
+        "revoked_at, created_at, updated_at"
+    )
+
+    def create_pat(
+        self,
+        usr_id: str,
+        name: str,
+        scope: list[str],
+        *,
+        expires_at: datetime | None = None,
+    ) -> tuple[PersonalAccessToken, str]:
+        usr_uuid = _wire_to_uuid(usr_id)
+        if not (1 <= len(name) <= 120):
+            raise PreconditionError(
+                f"PAT name must be 1–120 characters (got {len(name)})",
+                reason="pat.name_invalid",
+            )
+        now = self._now()
+        if expires_at is not None and expires_at <= now:
+            raise PreconditionError(
+                "PAT expires_at must be strictly in the future",
+                reason="pat.expires_in_past",
+            )
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status FROM usr WHERE id = %s FOR UPDATE",
+                    (usr_uuid,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError(f"User {usr_id} not found")
+                if row[0] == "revoked":
+                    raise AlreadyTerminalError(
+                        f"User {usr_id} is revoked; cannot issue PATs",
+                    )
+                pat_wire_id = _generate("pat")
+                pat_uuid = _wire_to_uuid(pat_wire_id)
+                id_hex_segment = pat_wire_id[4:]
+                secret_bytes = secrets.token_bytes(32)
+                secret_segment = _base64url_encode(secret_bytes)
+                token = f"pat_{id_hex_segment}_{secret_segment}"
+                secret_hash = hash_password(secret_segment)
+                cur.execute(
+                    f"""
+                    INSERT INTO pat (id, usr_id, name, scope, secret_hash,
+                                     expires_at, last_used_at, revoked_at,
+                                     created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, %s, %s)
+                    RETURNING {self._PAT_COLS}
+                    """,
+                    (
+                        pat_uuid,
+                        usr_uuid,
+                        name,
+                        list(scope),
+                        secret_hash,
+                        expires_at,
+                        now,
+                        now,
+                    ),
+                )
+                inserted = cur.fetchone()
+        assert inserted is not None
+        return self._row_to_pat(inserted), token
+
+    def get_pat(self, pat_id: str) -> PersonalAccessToken:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {self._PAT_COLS} FROM pat WHERE id = %s",
+                (_wire_to_uuid(pat_id),),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise NotFoundError(f"PAT {pat_id} not found")
+        return self._row_to_pat(row)
+
+    def list_pats_for_user(
+        self,
+        usr_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        status: PatStatus | None = None,
+    ) -> Page[PersonalAccessToken]:
+        limit = max(1, min(limit, 200))
+        sql = f"SELECT {self._PAT_COLS} FROM pat WHERE usr_id = %s"
+        params: list[Any] = [_wire_to_uuid(usr_id)]
+        if cursor is not None:
+            sql += " AND id > %s"
+            params.append(_wire_to_uuid(cursor))
+        if status is not None:
+            now = self._now()
+            if status is PatStatus.REVOKED:
+                sql += " AND revoked_at IS NOT NULL"
+            elif status is PatStatus.EXPIRED:
+                sql += " AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at <= %s"
+                params.append(now)
+            else:  # ACTIVE
+                sql += " AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > %s)"
+                params.append(now)
+        sql += " ORDER BY id ASC LIMIT %s"
+        params.append(limit + 1)
+        with self._conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+        data = [self._row_to_pat(r) for r in rows]
+        next_cursor = data[-1].id if has_more and data else None
+        return Page(data=data, next_cursor=next_cursor)
+
+    def revoke_pat(self, pat_id: str) -> PersonalAccessToken:
+        pat_uuid = _wire_to_uuid(pat_id)
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {self._PAT_COLS} FROM pat WHERE id = %s FOR UPDATE",
+                    (pat_uuid,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise NotFoundError(f"PAT {pat_id} not found")
+                if row[7] is not None:  # revoked_at
+                    return self._row_to_pat(row)
+                now = self._now()
+                cur.execute(
+                    f"UPDATE pat SET revoked_at = %s, updated_at = %s "
+                    f"WHERE id = %s RETURNING {self._PAT_COLS}",
+                    (now, now, pat_uuid),
+                )
+                updated = cur.fetchone()
+        assert updated is not None
+        return self._row_to_pat(updated)
+
+    def verify_pat_token(self, token: str) -> VerifiedPat:
+        # Steps 1–2: structural decode.
+        if not token.startswith("pat_"):
+            raise InvalidPatTokenError()
+        if len(token) < 4 + 32 + 1 + 1:
+            raise InvalidPatTokenError()
+        id_hex = token[4:36]
+        if not re.fullmatch(r"[0-9a-f]{32}", id_hex):
+            raise InvalidPatTokenError()
+        if token[36] != "_":
+            raise InvalidPatTokenError()
+        secret_segment = token[37:]
+        if not secret_segment:
+            raise InvalidPatTokenError()
+        pat_id = f"pat_{id_hex}"
+
+        # Step 3: lookup. _wire_to_uuid may raise on a structurally-valid
+        # 32hex segment that isn't a real UUID — for timing-oracle
+        # purposes that's still "invalid token", so we conflate.
+        try:
+            pat_uuid = _wire_to_uuid(pat_id)
+        except Exception:
+            raise InvalidPatTokenError() from None
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {self._PAT_COLS} FROM pat WHERE id = %s",
+                (pat_uuid,),
+            )
+            row = cur.fetchone()
+        # Step 4: missing → conflated InvalidPatTokenError.
+        if row is None:
+            raise InvalidPatTokenError()
+        # Step 5: revoked terminal check.
+        if row[7] is not None:
+            raise PatRevokedError(pat_id)
+        # Step 6: expiry.
+        now = self._now()
+        if row[5] is not None and row[5] <= now:
+            raise PatExpiredError(pat_id)
+        # Step 7: Argon2id verify; conflated error shape.
+        if not verify_password_hash(row[4], secret_segment):
+            raise InvalidPatTokenError()
+        # Step 8: last_used_at update with coalescing.
+        persisted = row[6]
+        should_update = (
+            persisted is None
+            or self._pat_last_used_coalesce_seconds == 0
+            or (now - persisted).total_seconds() >= self._pat_last_used_coalesce_seconds
+        )
+        if should_update:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE pat SET last_used_at = %s WHERE id = %s",
+                    (now, pat_uuid),
+                )
+        return VerifiedPat(
+            pat_id=pat_id,
+            usr_id=_encode("usr", str(row[1])),
+            scope=list(row[3]) if row[3] is not None else [],
+        )
+
+    def _row_to_pat(self, r: Sequence[Any]) -> PersonalAccessToken:
+        now = self._now()
+        expires_at = r[5]
+        revoked_at = r[7]
+        if revoked_at is not None:
+            status = PatStatus.REVOKED
+        elif expires_at is not None and expires_at <= now:
+            status = PatStatus.EXPIRED
+        else:
+            status = PatStatus.ACTIVE
+        return PersonalAccessToken(
+            id=_encode("pat", str(r[0])),
+            usr_id=_encode("usr", str(r[1])),
+            name=r[2],
+            scope=list(r[3]) if r[3] is not None else [],
+            status=status,
+            expires_at=expires_at,
+            last_used_at=r[6],
+            revoked_at=revoked_at,
+            created_at=r[8],
+            updated_at=r[9],
+        )
+
+
+def _base64url_encode(buf: bytes) -> str:
+    """RFC 4648 §5 base64url, no padding."""
+    return base64.urlsafe_b64encode(buf).rstrip(b"=").decode("ascii")

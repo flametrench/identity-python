@@ -22,18 +22,24 @@ from typing import Callable
 
 from flametrench_ids import generate
 
+import base64
+import re
 from .errors import (
     AlreadyTerminalError,
     CredentialNotActiveError,
     CredentialTypeMismatchError,
     DuplicateCredentialError,
     InvalidCredentialError,
+    InvalidPatTokenError,
     InvalidTokenError,
     NotFoundError,
+    PatExpiredError,
+    PatRevokedError,
     PreconditionError,
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
+from .pat import PatStatus, PersonalAccessToken, VerifiedPat
 from .mfa import (
     Factor,
     FactorStatus,
@@ -107,7 +113,12 @@ class InMemoryIdentityStore:
 
     UNSET: "_Unset" = _UNSET
 
-    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        pat_last_used_coalesce_seconds: int = 60,
+    ) -> None:
         self._users: dict[str, User] = {}
         self._credentials: dict[str, Credential] = {}
         self._password_hashes: dict[str, str] = {}  # cred_id → PHC hash
@@ -128,6 +139,11 @@ class InMemoryIdentityStore:
         # mfa_id by webauthn credential_id (active factors only)
         self._mfa_webauthn_by_credential_id: dict[str, str] = {}
         self._mfa_policies: dict[str, "UserMfaPolicy"] = {}
+        # ─── v0.3 PATs (ADR 0016) ───
+        self._pats: dict[str, PersonalAccessToken] = {}
+        self._pat_secret_hashes: dict[str, str] = {}  # pat_id → PHC hash
+        self._pat_last_used_persisted: dict[str, datetime] = {}
+        self._pat_last_used_coalesce_seconds = max(0, pat_last_used_coalesce_seconds)
         self._clock = clock or _default_clock
 
     # ─── Internal helpers ───
@@ -1229,3 +1245,217 @@ class InMemoryIdentityStore:
                 remaining=factor.remaining,
             )
         raise TypeError(f"Unknown factor type: {type(factor).__name__}")
+
+    # ─── v0.3 personal access tokens (ADR 0016) ───
+
+    def create_pat(
+        self,
+        usr_id: str,
+        name: str,
+        scope: list[str],
+        *,
+        expires_at: datetime | None = None,
+    ) -> tuple[PersonalAccessToken, str]:
+        """Mint a new PAT bound to ``usr_id``.
+
+        Returns a tuple of ``(record, plaintext_token)``. The plaintext
+        token is in ``pat_<32hex>_<base64url>`` form and is returned
+        ONCE — the server stores only an Argon2id hash of the secret
+        segment.
+
+        Authorization gating is the adopter's responsibility.
+        """
+        u = self._require_user(usr_id)
+        if u.status == Status.REVOKED:
+            raise AlreadyTerminalError(
+                f"User {usr_id} is revoked; cannot issue PATs"
+            )
+        if not (1 <= len(name) <= 120):
+            raise PreconditionError(
+                f"PAT name must be 1–120 characters (got {len(name)})",
+                reason="pat.name_invalid",
+            )
+        now = self._now()
+        if expires_at is not None and expires_at <= now:
+            raise PreconditionError(
+                "PAT expires_at must be strictly in the future",
+                reason="pat.expires_in_past",
+            )
+        pat_id = generate("pat")
+        id_hex_segment = pat_id[4:]  # strip 'pat_' → 32 hex
+        secret_bytes = secrets.token_bytes(32)
+        secret_segment = _base64url_encode(secret_bytes)
+        token = f"pat_{id_hex_segment}_{secret_segment}"
+        secret_hash = hash_password(secret_segment)
+
+        pat = PersonalAccessToken(
+            id=pat_id,
+            usr_id=usr_id,
+            name=name,
+            scope=list(scope),
+            status=PatStatus.ACTIVE,
+            expires_at=expires_at,
+            last_used_at=None,
+            revoked_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._pats[pat_id] = pat
+        self._pat_secret_hashes[pat_id] = secret_hash
+        return pat, token
+
+    def get_pat(self, pat_id: str) -> PersonalAccessToken:
+        pat = self._pats.get(pat_id)
+        if pat is None:
+            raise NotFoundError(f"PAT {pat_id} not found")
+        return self._with_derived_status(pat)
+
+    def list_pats_for_user(
+        self,
+        usr_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        status: PatStatus | None = None,
+    ) -> Page[PersonalAccessToken]:
+        limit = max(1, min(limit, 200))
+        matching: list[PersonalAccessToken] = []
+        for pat in self._pats.values():
+            if pat.usr_id != usr_id:
+                continue
+            derived = self._with_derived_status(pat)
+            if status is not None and derived.status != status:
+                continue
+            matching.append(derived)
+        matching.sort(key=lambda p: p.id)
+        if cursor is not None:
+            start_idx = next(
+                (i for i, p in enumerate(matching) if p.id > cursor),
+                len(matching),
+            )
+        else:
+            start_idx = 0
+        slice_ = matching[start_idx : start_idx + limit]
+        next_cursor = (
+            slice_[-1].id
+            if (start_idx + limit) < len(matching) and slice_
+            else None
+        )
+        return Page(data=slice_, next_cursor=next_cursor)
+
+    def revoke_pat(self, pat_id: str) -> PersonalAccessToken:
+        pat = self._pats.get(pat_id)
+        if pat is None:
+            raise NotFoundError(f"PAT {pat_id} not found")
+        if pat.revoked_at is not None:
+            # Idempotent: already revoked.
+            return self._with_derived_status(pat)
+        now = self._now()
+        updated = PersonalAccessToken(
+            id=pat.id,
+            usr_id=pat.usr_id,
+            name=pat.name,
+            scope=pat.scope,
+            status=PatStatus.REVOKED,
+            expires_at=pat.expires_at,
+            last_used_at=pat.last_used_at,
+            revoked_at=now,
+            created_at=pat.created_at,
+            updated_at=now,
+        )
+        self._pats[pat_id] = updated
+        return updated
+
+    def verify_pat_token(self, token: str) -> VerifiedPat:
+        """Verify a PAT bearer per ADR 0016 §"Verification semantics".
+
+        The 8-step normative ordering is implemented here:
+        prefix → split → lookup → revoked → expired → secret → coalesce.
+        Missing-row and wrong-secret cases conflate to
+        :class:`InvalidPatTokenError` to defend against a token-presence
+        timing oracle.
+        """
+        # Step 1–2: structural decode.
+        if not token.startswith("pat_"):
+            raise InvalidPatTokenError()
+        if len(token) < 4 + 32 + 1 + 1:
+            raise InvalidPatTokenError()
+        id_hex = token[4:36]
+        if not re.fullmatch(r"[0-9a-f]{32}", id_hex):
+            raise InvalidPatTokenError()
+        if token[36] != "_":
+            raise InvalidPatTokenError()
+        secret_segment = token[37:]
+        if not secret_segment:
+            raise InvalidPatTokenError()
+        pat_id = f"pat_{id_hex}"
+
+        # Step 3–4: lookup; conflate "no row" with "wrong secret".
+        pat = self._pats.get(pat_id)
+        if pat is None:
+            raise InvalidPatTokenError()
+        # Step 5: revoked terminal check.
+        if pat.revoked_at is not None:
+            raise PatRevokedError(pat_id)
+        # Step 6: expiry.
+        now = self._now()
+        if pat.expires_at is not None and pat.expires_at <= now:
+            raise PatExpiredError(pat_id)
+        # Step 7: Argon2id verify; conflated error shape.
+        hash_ = self._pat_secret_hashes.get(pat_id)
+        if hash_ is None or not verify_password_hash(hash_, secret_segment):
+            raise InvalidPatTokenError()
+        # Step 8: last_used_at update with coalescing.
+        persisted = self._pat_last_used_persisted.get(pat_id)
+        should_update = (
+            persisted is None
+            or self._pat_last_used_coalesce_seconds == 0
+            or (now - persisted).total_seconds() >= self._pat_last_used_coalesce_seconds
+        )
+        if should_update:
+            self._pats[pat_id] = PersonalAccessToken(
+                id=pat.id,
+                usr_id=pat.usr_id,
+                name=pat.name,
+                scope=pat.scope,
+                status=pat.status,
+                expires_at=pat.expires_at,
+                last_used_at=now,
+                revoked_at=pat.revoked_at,
+                created_at=pat.created_at,
+                updated_at=now,
+            )
+            self._pat_last_used_persisted[pat_id] = now
+        return VerifiedPat(
+            pat_id=pat_id,
+            usr_id=pat.usr_id,
+            scope=list(pat.scope),
+        )
+
+    def _with_derived_status(self, pat: PersonalAccessToken) -> PersonalAccessToken:
+        """Re-derive status from lifecycle columns (revoked / expired / now)."""
+        if pat.revoked_at is not None:
+            derived = PatStatus.REVOKED
+        elif pat.expires_at is not None and pat.expires_at <= self._now():
+            derived = PatStatus.EXPIRED
+        else:
+            derived = PatStatus.ACTIVE
+        if derived == pat.status:
+            return pat
+        return PersonalAccessToken(
+            id=pat.id,
+            usr_id=pat.usr_id,
+            name=pat.name,
+            scope=pat.scope,
+            status=derived,
+            expires_at=pat.expires_at,
+            last_used_at=pat.last_used_at,
+            revoked_at=pat.revoked_at,
+            created_at=pat.created_at,
+            updated_at=pat.updated_at,
+        )
+
+
+def _base64url_encode(buf: bytes) -> str:
+    """RFC 4648 §5 base64url, no padding."""
+    return base64.urlsafe_b64encode(buf).rstrip(b"=").decode("ascii")

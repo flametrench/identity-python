@@ -87,3 +87,39 @@ class PreconditionError(IdentityError):
     def __init__(self, message: str, reason: str) -> None:
         super().__init__(message, code=f"precondition.{reason}")
         self.reason = reason
+
+
+class InvalidPatTokenError(IdentityError):
+    """Raised by verify_pat_token when the bearer is malformed, references
+    a non-existent pat row, or carries the wrong secret (ADR 0016).
+
+    The "no row" and "wrong secret" cases MUST conflate to this single
+    error class with an identical message — distinguishable errors leak
+    token-presence as a timing oracle. See ADR 0016
+    §"Verification semantics".
+    """
+
+    def __init__(self, message: str = "invalid personal access token") -> None:
+        super().__init__(message, code="pat.invalid")
+
+
+class PatExpiredError(IdentityError):
+    """Raised by verify_pat_token when the pat row exists, has not been
+    revoked, but is past its expires_at (ADR 0016)."""
+
+    def __init__(self, pat_id: str) -> None:
+        super().__init__(
+            f"personal access token {pat_id} is expired",
+            code="pat.expired",
+        )
+
+
+class PatRevokedError(IdentityError):
+    """Raised by verify_pat_token when the pat row has been explicitly
+    revoked via revoke_pat (ADR 0016). Terminal."""
+
+    def __init__(self, pat_id: str) -> None:
+        super().__init__(
+            f"personal access token {pat_id} is revoked",
+            code="pat.revoked",
+        )

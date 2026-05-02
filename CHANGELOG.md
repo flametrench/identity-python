@@ -3,6 +3,23 @@
 All notable changes to `flametrench-identity` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [v0.3.0] — Unreleased (PyPI publish blocked)
+
+### Added (personal access tokens, ADR 0016)
+- New `flametrench_identity.pat` module: `PersonalAccessToken` dataclass, `PatStatus` enum, `VerifiedPat` dataclass.
+- New exceptions: `InvalidPatTokenError`, `PatExpiredError`, `PatRevokedError`. The "no row" and "wrong secret" cases conflate to `InvalidPatTokenError` to defend against a token-presence timing oracle (ADR 0016 §"Verification semantics").
+- New methods on both `InMemoryIdentityStore` and `PostgresIdentityStore`: `create_pat`, `get_pat`, `list_pats_for_user`, `revoke_pat`, `verify_pat_token`.
+- Wire format: `pat_<32hex-id>_<base64url-secret>` (Stripe-style id-then-secret). The plaintext token is returned ONCE in the `create_pat` result and never again — the server stores only an Argon2id hash of the secret segment at the cred-password parameter floor.
+- New `pat_last_used_coalesce_seconds` constructor option on both stores (default 60s) to avoid a write-per-request hot path on the `last_used_at` column. 0 disables coalescing.
+- `PostgresIdentityStore` PAT methods cooperate with `connection.transaction()` (psycopg3 auto-uses `SAVEPOINT/RELEASE` when nested per ADR 0013).
+- 33 new tests (20 in-memory + 13 Postgres integration).
+
+### Required dependency bump
+- `flametrench-ids` constraint now `>=0.3.0` for the `pat` type prefix (ADR 0016).
+
+### Release status
+- Tagged in lockstep with the Node and PHP v0.3.0 cuts; PyPI publication remains externally blocked. Wheels build locally; downstream consumers should install via `pip install -e .` from a sibling checkout until PyPI access unblocks.
+
 ## [v0.2.0rc5] — 2026-04-27
 
 ### Fixed (security posture)

@@ -55,7 +55,9 @@ CREATE TABLE usr (
     id            UUID PRIMARY KEY,
     status        TEXT NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active', 'suspended', 'revoked')),
-    -- ADR 0014 (v0.2) — optional human-meaningful render string.
+    -- Optional human-meaningful render string (ADR 0014, v0.2). Spec is
+    -- permissive: no length cap, no uniqueness, no normalization. Adopters
+    -- that need stricter rules apply them at the application layer.
     display_name  TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -616,6 +618,159 @@ CREATE UNIQUE INDEX org_slug_unique ON org (slug)
     WHERE slug IS NOT NULL;
 
 -- ===========================================================================
+-- v0.2 additions: share tokens per ADR 0012 (Proposed)
+-- ===========================================================================
+--
+-- A share grants the bearer of an opaque short-TTL token resource-scoped
+-- access to a single (object_type, object_id) at a given relation. The
+-- bearer is NOT promoted to an authenticated principal — they receive
+-- only the verified relation on the verified object. Hosts MUST NOT
+-- treat a share-bearer as a `usr_id` for any other surface.
+--
+-- Token storage matches `ses`: SHA-256 of the bearer token persisted as
+-- 32 raw bytes. The plaintext token is returned ONCE on createShare and
+-- never persisted. Constant-time comparison on verify.
+--
+-- `expires_at` is required and bounded above by 1 year per ADR 0012.
+-- `single_use` shares set `consumed_at` transactionally on first verify;
+-- a race between two concurrent verifies of a single-use token MUST
+-- yield exactly one success and exactly one ShareConsumedError.
+
+CREATE TABLE shr (
+    id            UUID PRIMARY KEY,
+    token_hash    BYTEA NOT NULL,
+    object_type   TEXT NOT NULL
+                    CHECK (object_type ~ '^[a-z]{2,6}$'),
+    object_id     UUID NOT NULL,
+    relation      TEXT NOT NULL
+                    CHECK (relation ~ '^[a-z_]{2,32}$'),
+    created_by    UUID NOT NULL REFERENCES usr(id),
+    expires_at    TIMESTAMPTZ NOT NULL,
+    single_use    BOOLEAN NOT NULL DEFAULT FALSE,
+    consumed_at   TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CHECK (octet_length(token_hash) = 32),
+    CHECK (expires_at > created_at),
+    CHECK (consumed_at IS NULL OR single_use = TRUE),
+    CHECK (consumed_at IS NULL OR consumed_at >= created_at),
+    CHECK (revoked_at  IS NULL OR revoked_at  >= created_at),
+    -- 1-year ceiling on share lifetime per ADR 0012. Adopters MAY
+    -- enforce a tighter cap at the application layer.
+    CHECK (expires_at <= created_at + INTERVAL '365 days')
+);
+
+-- Two indexes on token_hash by design:
+--
+-- (1) The partial-unique index enforces "no two ACTIVE shares share a
+--     token hash" — the property that matters for security. Consumed and
+--     revoked rows are excluded so a re-issued token (after a 256-bit
+--     entropy collision, vanishingly unlikely but not impossible) is not
+--     blocked by a defunct row.
+CREATE UNIQUE INDEX shr_token_hash_active_idx ON shr (token_hash)
+    WHERE revoked_at IS NULL AND consumed_at IS NULL;
+-- (2) The non-partial index serves the verify hot path: lookups need to
+--     find consumed / revoked / expired rows so the SDK can return the
+--     correct error class (ShareRevokedError vs ShareConsumedError vs
+--     ShareExpiredError vs InvalidShareTokenError) per ADR 0012's spec
+--     ordering. A query `SELECT … WHERE token_hash = $1` cannot use the
+--     partial index above without also matching its predicate, so a
+--     plain index is required.
+CREATE INDEX shr_token_hash_idx ON shr (token_hash);
+
+-- "Show me all shares minted on this resource" — the listSharesForObject
+-- enumeration path.
+CREATE INDEX shr_object_idx ON shr (object_type, object_id);
+
+-- "Sweep expired shares" — operational cleanup; not on the verify hot path.
+CREATE INDEX shr_expires_idx ON shr (expires_at)
+    WHERE revoked_at IS NULL;
+
+-- ===========================================================================
+-- v0.3 additions: personal access tokens per ADR 0016 (Proposed)
+-- ===========================================================================
+--
+-- A PAT is a long-lived bearer credential bound to a `usr_id`, intended
+-- for non-interactive use (CLI / CI / server-to-server). The wire token
+-- is `pat_<32hex-id>_<base64url-secret>`: the id half is the indexed
+-- handle (this row's primary key), the secret half is verified by
+-- Argon2id against `secret_hash`. The plaintext token is returned ONCE
+-- on createPat and never persisted.
+--
+-- PATs are NOT a cred variant. They have a different lifecycle (no
+-- rotation, no replaces chain), a different verification path (bearer
+-- secret, not interactive credential), and a different audit shape
+-- (`auth.kind = 'pat'`). They are stored separately to keep these
+-- semantics distinct from the cred model.
+--
+-- Verification protocol (normative; see ADR 0016 §"Verification semantics"):
+--
+--   1. The auth middleware inspects the bearer prefix. `pat_…` routes
+--      to verifyPatToken; other prefixes route to session / share
+--      verifiers respectively.
+--   2. Split the token on the FIRST underscore after `pat_<32hex>` to
+--      recover the id segment and the secret segment.
+--   3. SELECT … FROM pat WHERE id = $id_decoded.
+--   4. If the row is missing, return InvalidPatTokenError. The error
+--      message MUST conflate "no such row" with "wrong secret" to
+--      avoid a token-presence timing oracle.
+--   5. If revoked_at IS NOT NULL, return PatRevokedError.
+--   6. If expires_at IS NOT NULL AND expires_at <= now(), return
+--      PatExpiredError.
+--   7. Argon2id-verify the secret segment against secret_hash.
+--      Mismatch → InvalidPatTokenError (same shape as step 4).
+--   8. Update last_used_at. The SDK MAY coalesce these writes within
+--      a configurable window (60s default) to avoid a write-per-
+--      request hot path.
+--
+-- The error ordering (revoked > expired > invalid_secret) matches the
+-- share-token convention from ADR 0012.
+
+CREATE TABLE pat (
+    id            UUID PRIMARY KEY,
+    usr_id        UUID NOT NULL REFERENCES usr(id),
+    name          TEXT NOT NULL,
+
+    -- Application-defined scope claims. The spec does not pin
+    -- vocabulary; adopters' authz layer interprets the strings.
+    scope         TEXT[] NOT NULL DEFAULT '{}',
+
+    -- PHC-encoded Argon2id hash of the base64url secret segment.
+    -- Spec pins the same minimum parameters as cred.password_hash:
+    -- memory >= 19 MiB, iterations >= 2, parallelism >= 1 (OWASP floor).
+    -- The plaintext secret leaves the server exactly once (createPat).
+    secret_hash   TEXT NOT NULL,
+
+    expires_at    TIMESTAMPTZ,
+    last_used_at  TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CHECK (expires_at   IS NULL OR expires_at   > created_at),
+    CHECK (last_used_at IS NULL OR last_used_at >= created_at),
+    CHECK (revoked_at   IS NULL OR revoked_at   >= created_at),
+    -- `name` is a human label shown in the user's token list. Adopters
+    -- MAY enforce a tighter cap; 120 is the spec ceiling.
+    CHECK (length(name) BETWEEN 1 AND 120)
+);
+
+-- "List PATs for this user" — primary enumeration path.
+CREATE INDEX pat_usr_idx ON pat (usr_id, created_at DESC);
+
+-- "Active PATs only" — speeds up status='active' filter on the list path.
+CREATE INDEX pat_usr_active_idx ON pat (usr_id, created_at DESC)
+    WHERE revoked_at IS NULL;
+
+-- "Sweep expired PATs" — operational cleanup; not on the verify hot
+-- path. The verify path looks up by primary key (id), so no token-hash
+-- index is needed (contrast with `ses` and `shr`, which look up by
+-- token hash because their wire format is opaque).
+CREATE INDEX pat_expires_idx ON pat (expires_at)
+    WHERE revoked_at IS NULL AND expires_at IS NOT NULL;
+
+-- ===========================================================================
 -- v0.2 note: rewrite rules (ADR 0007)
 -- ===========================================================================
 --
@@ -655,6 +810,10 @@ CREATE TRIGGER mem_touch  BEFORE UPDATE ON mem
 CREATE TRIGGER mfa_touch              BEFORE UPDATE ON mfa
     FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
 CREATE TRIGGER usr_mfa_policy_touch   BEFORE UPDATE ON usr_mfa_policy
+    FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
+
+-- v0.3:
+CREATE TRIGGER pat_touch              BEFORE UPDATE ON pat
     FOR EACH ROW EXECUTE FUNCTION flametrench_touch_updated_at();
 
 -- ses, inv, and tup are append-only / lifecycle-terminal; no updated_at.

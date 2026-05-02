@@ -19,13 +19,17 @@ from .errors import (
     DuplicateCredentialError,
     IdentityError,
     InvalidCredentialError,
+    InvalidPatTokenError,
     InvalidTokenError,
     NotFoundError,
+    PatExpiredError,
+    PatRevokedError,
     PreconditionError,
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
 from .in_memory import InMemoryIdentityStore
+from .pat import PatStatus, PersonalAccessToken, VerifiedPat
 from .mfa import (
     DEFAULT_TOTP_ALGORITHM,
     DEFAULT_TOTP_DIGITS,
@@ -157,6 +161,13 @@ __all__ = [
     "totp_verify",
     "verify_password_hash",
     "webauthn_verify_assertion",
+    # v0.3 — Personal access tokens (Proposed; ADR 0016)
+    "InvalidPatTokenError",
+    "PatExpiredError",
+    "PatRevokedError",
+    "PatStatus",
+    "PersonalAccessToken",
+    "VerifiedPat",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
