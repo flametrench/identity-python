@@ -33,6 +33,7 @@ from .pat import (
     PAT_DUMMY_PHC_HASH,
     PAT_MAX_LIFETIME_SECONDS,
     PAT_MAX_SECRET_LENGTH,
+    AuthKind,
     PatStatus,
     PersonalAccessToken,
     VerifiedPat,
@@ -171,6 +172,7 @@ __all__ = [
     "verify_password_hash",
     "webauthn_verify_assertion",
     # v0.3 — Personal access tokens (Proposed; ADR 0016)
+    "AuthKind",
     "InvalidPatTokenError",
     "PAT_DUMMY_PHC_HASH",
     "PAT_MAX_LIFETIME_SECONDS",

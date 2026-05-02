@@ -1269,6 +1269,14 @@ class InMemoryIdentityStore:
             user's behalf. The SDK does not enforce. Without
             route-layer gating, any authenticated user can mint PATs
             in any other user's name. (security-audit-v0.3.md H7.)
+
+            Adopter MUST gate calls on ``scope``. The SDK persists
+            scope as opaque strings — it does NOT interpret them at
+            ``verify_pat_token`` time. Unlike ``tup.relation`` (which
+            ``check()`` enforces against the rule registry), scope is
+            purely an audit tag unless the adopter's request handler
+            reads ``VerifiedPat.scope`` and gates the request.
+            (security-audit-v0.3.md F5.)
         """
         u = self._require_user(usr_id)
         if u.status == Status.REVOKED:
