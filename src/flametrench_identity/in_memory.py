@@ -39,7 +39,7 @@ from .errors import (
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
-from .pat import PAT_MAX_LIFETIME_SECONDS, PatStatus, PersonalAccessToken, VerifiedPat
+from .pat import PAT_DUMMY_PHC_HASH, PAT_MAX_LIFETIME_SECONDS, PatStatus, PersonalAccessToken, VerifiedPat
 from .mfa import (
     Factor,
     FactorStatus,
@@ -1400,8 +1400,13 @@ class InMemoryIdentityStore:
         pat_id = f"pat_{id_hex}"
 
         # Step 3–4: lookup; conflate "no row" with "wrong secret".
+        # security-audit-v0.3.md H2: when the row is missing we still
+        # perform an Argon2id verify against a dummy hash so the
+        # wall-clock time of "no such pat_id" matches the
+        # row-exists-but-wrong-secret path.
         pat = self._pats.get(pat_id)
         if pat is None:
+            verify_password_hash(PAT_DUMMY_PHC_HASH, secret_segment)
             raise InvalidPatTokenError()
         # Step 5: revoked terminal check.
         if pat.revoked_at is not None:

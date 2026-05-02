@@ -45,7 +45,7 @@ from .errors import (
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
-from .pat import PAT_MAX_LIFETIME_SECONDS, PatStatus, PersonalAccessToken, VerifiedPat
+from .pat import PAT_DUMMY_PHC_HASH, PAT_MAX_LIFETIME_SECONDS, PatStatus, PersonalAccessToken, VerifiedPat
 from .mfa import (
     DEFAULT_TOTP_ALGORITHM,
     DEFAULT_TOTP_DIGITS,
@@ -1656,6 +1656,9 @@ class PostgresIdentityStore:
         try:
             pat_uuid = _wire_to_uuid(pat_id)
         except Exception:
+            # security-audit-v0.3.md H2: timing-oracle defense for
+            # structurally-valid-but-not-UUIDv7 ids.
+            verify_password_hash(PAT_DUMMY_PHC_HASH, secret_segment)
             raise InvalidPatTokenError() from None
 
         with self._conn.cursor() as cur:
@@ -1665,7 +1668,10 @@ class PostgresIdentityStore:
             )
             row = cur.fetchone()
         # Step 4: missing → conflated InvalidPatTokenError.
+        # security-audit-v0.3.md H2: perform Argon2id verify against
+        # dummy hash so wall-clock time matches the row-exists path.
         if row is None:
+            verify_password_hash(PAT_DUMMY_PHC_HASH, secret_segment)
             raise InvalidPatTokenError()
         # Step 5: revoked terminal check.
         if row[7] is not None:
