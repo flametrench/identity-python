@@ -1263,7 +1263,12 @@ class InMemoryIdentityStore:
         ONCE — the server stores only an Argon2id hash of the secret
         segment.
 
-        Authorization gating is the adopter's responsibility.
+        Security:
+            Adopter MUST gate this call so the requesting principal
+            either owns ``usr_id`` OR is a sysadmin acting on the
+            user's behalf. The SDK does not enforce. Without
+            route-layer gating, any authenticated user can mint PATs
+            in any other user's name. (security-audit-v0.3.md H7.)
         """
         u = self._require_user(usr_id)
         if u.status == Status.REVOKED:
@@ -1314,6 +1319,15 @@ class InMemoryIdentityStore:
         return pat, token
 
     def get_pat(self, pat_id: str) -> PersonalAccessToken:
+        """Read a single PAT row by id.
+
+        Security:
+            Adopter MUST gate so the requesting principal either owns
+            the PAT (matches ``usr_id`` of the row) OR is a sysadmin.
+            The SDK returns the row regardless — without gating, an
+            unauthenticated / wrong-principal request leaks the PAT's
+            existence, scope, and metadata. (security-audit-v0.3.md H7.)
+        """
         pat = self._pats.get(pat_id)
         if pat is None:
             raise NotFoundError(f"PAT {pat_id} not found")
@@ -1327,6 +1341,14 @@ class InMemoryIdentityStore:
         limit: int = 50,
         status: PatStatus | None = None,
     ) -> Page[PersonalAccessToken]:
+        """Cursor-paginated PAT list for ``usr_id``.
+
+        Security:
+            Adopter MUST gate so the requesting principal either is
+            ``usr_id`` OR is a sysadmin. Without gating, any caller
+            can enumerate any user's PATs.
+            (security-audit-v0.3.md H7.)
+        """
         limit = max(1, min(limit, 200))
         matching: list[PersonalAccessToken] = []
         for pat in self._pats.values():
@@ -1353,6 +1375,14 @@ class InMemoryIdentityStore:
         return Page(data=slice_, next_cursor=next_cursor)
 
     def revoke_pat(self, pat_id: str) -> PersonalAccessToken:
+        """Terminal-state revoke; idempotent.
+
+        Security:
+            Adopter MUST gate so the requesting principal either owns
+            the PAT OR is a sysadmin. Without gating, any caller can
+            revoke any user's PAT — locking the legitimate owner out
+            of their own automation. (security-audit-v0.3.md H7.)
+        """
         pat = self._pats.get(pat_id)
         if pat is None:
             raise NotFoundError(f"PAT {pat_id} not found")
