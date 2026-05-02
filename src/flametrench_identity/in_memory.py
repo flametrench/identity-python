@@ -39,7 +39,7 @@ from .errors import (
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
-from .pat import PAT_DUMMY_PHC_HASH, PAT_MAX_LIFETIME_SECONDS, PatStatus, PersonalAccessToken, VerifiedPat
+from .pat import PAT_DUMMY_PHC_HASH, PAT_MAX_LIFETIME_SECONDS, PAT_MAX_SECRET_LENGTH, PatStatus, PersonalAccessToken, VerifiedPat
 from .mfa import (
     Factor,
     FactorStatus,
@@ -1395,7 +1395,10 @@ class InMemoryIdentityStore:
         if token[36] != "_":
             raise InvalidPatTokenError()
         secret_segment = token[37:]
-        if not secret_segment:
+        # security-audit-v0.3.md H6: cap on secret-segment length so
+        # an attacker with a known pat_id cannot force unbounded
+        # Argon2id work by submitting MB-sized secrets.
+        if not secret_segment or len(secret_segment) > PAT_MAX_SECRET_LENGTH:
             raise InvalidPatTokenError()
         pat_id = f"pat_{id_hex}"
 
