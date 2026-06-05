@@ -161,3 +161,100 @@ class VerifiedCredential:
 class Page(Generic[T]):
     data: list[T]
     next_cursor: str | None
+
+
+# ─── PAT types (ADR 0016, v0.3) ───
+
+# Spec floor: 365 days in seconds.
+PAT_MAX_LIFETIME_SECONDS: int = 365 * 24 * 60 * 60
+
+# DoS guard: reject secret segments longer than this before Argon2id.
+PAT_MAX_SECRET_LENGTH: int = 256
+
+# Canonical dummy PHC hash for timing-oracle defense (security-audit-v0.3 H2).
+# Verifies against "correcthorsebatterystaple" at the spec floor params.
+PAT_DUMMY_PHC_HASH: str = (
+    "$argon2id$v=19$m=19456,t=2,p=1$"
+    "779z4UHkLWR4w0TEo9gcHg$"
+    "Gz0+nGnpokhsKi1cPlx8i74FBN1Nq0OURZ3xso1AHMU"
+)
+
+
+class PatStatus(str, Enum):
+    """Personal access token lifecycle status."""
+
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+
+
+class AuthKind(str, Enum):
+    """Audit ``auth.kind`` discriminator (ADR 0016 §"Bearer routing")."""
+
+    PAT = "pat"
+    SHARE = "share"
+    SESSION = "session"
+    SYSTEM = "system"
+
+
+def classify_bearer(token: str) -> AuthKind:
+    """Pure prefix classifier — no DB lookup, no crypto.
+
+    Returns the ``auth.kind`` discriminator for ``token`` per ADR 0016
+    §"Bearer routing".
+    """
+    if token.startswith("pat_"):
+        return AuthKind.PAT
+    if token.startswith("shr_"):
+        return AuthKind.SHARE
+    return AuthKind.SESSION
+
+
+import re as _re
+
+_PAT_WIRE_RE = _re.compile(r"^pat_[0-9a-f]{32}_[A-Za-z0-9_-]+$")
+
+
+def is_structurally_valid_pat_token(token: str) -> bool:
+    """Structural check per ADR 0016 §"Wire format".
+
+    Returns ``True`` iff ``token`` matches ``pat_<32hex>_<base64url>``.
+    Does NOT hit the database or Argon2id verifier.
+    """
+    return bool(_PAT_WIRE_RE.match(token))
+
+
+@dataclass(frozen=True)
+class PersonalAccessToken:
+    """Server-persisted PAT record. Secret hash is never exposed."""
+
+    id: str
+    usr_id: str
+    name: str
+    scope: list[str]
+    status: PatStatus
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime | None = None
+    last_used_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedPat:
+    """Success outcome of ``verify_pat_token``."""
+
+    pat_id: str
+    usr_id: str
+    scope: list[str]
+
+
+@dataclass(frozen=True)
+class CreatePatResult:
+    """Success outcome of ``create_pat``.
+
+    ``token`` is the plaintext bearer — only visible here.
+    """
+
+    pat: PersonalAccessToken
+    token: str

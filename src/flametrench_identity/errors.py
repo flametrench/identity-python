@@ -87,3 +87,33 @@ class PreconditionError(IdentityError):
     def __init__(self, message: str, reason: str) -> None:
         super().__init__(message, code=f"precondition.{reason}")
         self.reason = reason
+
+
+# ─── PAT errors (ADR 0016, v0.3) ───
+
+
+class InvalidPatTokenError(IdentityError):
+    """The PAT bearer token is malformed, unknown, or has the wrong secret.
+
+    Intentionally conflates "no such pat_id" with "wrong secret" to
+    avoid a timing-side-channel oracle (security-audit-v0.3 H2).
+    """
+
+    def __init__(self, message: str = "Invalid PAT token") -> None:
+        super().__init__(message, code="invalid_pat_token")
+
+
+class PatRevokedError(IdentityError):
+    """The PAT has been explicitly revoked."""
+
+    def __init__(self, pat_id: str) -> None:
+        super().__init__(f"PAT {pat_id} has been revoked", code="pat_revoked")
+        self.pat_id = pat_id
+
+
+class PatExpiredError(IdentityError):
+    """The PAT has passed its ``expires_at`` timestamp."""
+
+    def __init__(self, pat_id: str) -> None:
+        super().__init__(f"PAT {pat_id} has expired", code="pat_expired")
+        self.pat_id = pat_id

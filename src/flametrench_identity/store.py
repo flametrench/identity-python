@@ -14,20 +14,24 @@ Cascade guarantees (spec-required):
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from .types import (
+    CreatePatResult,
     Credential,
     CredentialType,
     OidcCredential,
     Page,
     PasskeyCredential,
+    PersonalAccessToken,
     PasswordCredential,
     Session,
     SessionWithToken,
     Status,
     User,
     VerifiedCredential,
+    VerifiedPat,
 )
 
 
@@ -132,3 +136,24 @@ class IdentityStore(Protocol):
     def refresh_session(self, ses_id: str) -> SessionWithToken: ...
 
     def revoke_session(self, ses_id: str) -> Session: ...
+
+    # ─── PATs (ADR 0016, v0.3) ───
+
+    def create_pat(
+        self,
+        usr_id: str,
+        name: str,
+        scope: list[str],
+        *,
+        expires_at: "datetime | None" = None,
+    ) -> CreatePatResult: ...
+
+    def get_pat(self, pat_id: str) -> PersonalAccessToken: ...
+
+    def list_pats_for_user(
+        self, usr_id: str, *, cursor: str | None = None, limit: int = 50
+    ) -> "Page[PersonalAccessToken]": ...
+
+    def verify_pat_token(self, token: str) -> VerifiedPat: ...
+
+    def revoke_pat(self, pat_id: str) -> PersonalAccessToken: ...

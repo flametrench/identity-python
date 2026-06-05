@@ -14,7 +14,9 @@ dicts so the public surface never leaks them.
 
 from __future__ import annotations
 
+import base64
 import hmac
+import re as _re
 import secrets
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -28,8 +30,11 @@ from .errors import (
     CredentialTypeMismatchError,
     DuplicateCredentialError,
     InvalidCredentialError,
+    InvalidPatTokenError,
     InvalidTokenError,
     NotFoundError,
+    PatExpiredError,
+    PatRevokedError,
     PreconditionError,
     SessionExpiredError,
 )
@@ -58,17 +63,25 @@ from .mfa import (
     totp_verify,
 )
 from .types import (
+    CreatePatResult,
     Credential,
     CredentialType,
     OidcCredential,
+    PAT_DUMMY_PHC_HASH,
+    PAT_MAX_LIFETIME_SECONDS,
+    PAT_MAX_SECRET_LENGTH,
     Page,
     PasskeyCredential,
+    PatStatus,
+    PersonalAccessToken,
     PasswordCredential,
     Session,
     SessionWithToken,
     Status,
     User,
     VerifiedCredential,
+    VerifiedPat,
+    is_structurally_valid_pat_token,
 )
 from .webauthn import (
     WebAuthnError,
@@ -128,6 +141,11 @@ class InMemoryIdentityStore:
         # mfa_id by webauthn credential_id (active factors only)
         self._mfa_webauthn_by_credential_id: dict[str, str] = {}
         self._mfa_policies: dict[str, "UserMfaPolicy"] = {}
+        # ─── v0.3 PATs (ADR 0016) ───
+        self._pats: dict[str, PersonalAccessToken] = {}
+        self._pat_secret_hashes: dict[str, str] = {}  # pat_id → PHC hash
+        self._pat_last_used_persist: dict[str, datetime] = {}
+        self._pat_last_used_coalesce_seconds: int = 60
         self._clock = clock or _default_clock
 
     # ─── Internal helpers ───
@@ -174,6 +192,22 @@ class InMemoryIdentityStore:
                 token_hash = self._session_token_hashes.pop(ses_id, None)
                 if token_hash is not None:
                     self._session_by_token_hash.pop(token_hash, None)
+
+    def _cascade_revoke_pats_for_user(self, usr_id: str, now: datetime) -> None:
+        for pat_id, pat in list(self._pats.items()):
+            if pat.usr_id == usr_id and pat.revoked_at is None:
+                self._pats[pat_id] = PersonalAccessToken(
+                    id=pat.id,
+                    usr_id=pat.usr_id,
+                    name=pat.name,
+                    scope=list(pat.scope),
+                    status=PatStatus.REVOKED,
+                    expires_at=pat.expires_at,
+                    last_used_at=pat.last_used_at,
+                    revoked_at=now,
+                    created_at=pat.created_at,
+                    updated_at=now,
+                )
 
     @staticmethod
     def _with_credential_status(
@@ -360,6 +394,7 @@ class InMemoryIdentityStore:
                     self._identifier_key(cred.type, cred.identifier), None
                 )
         self._cascade_revoke_sessions_for_user(usr_id)
+        self._cascade_revoke_pats_for_user(usr_id, now)
         updated = u.with_status(Status.REVOKED, now)
         self._users[usr_id] = updated
         return updated
@@ -1229,3 +1264,155 @@ class InMemoryIdentityStore:
                 remaining=factor.remaining,
             )
         raise TypeError(f"Unknown factor type: {type(factor).__name__}")
+
+    # ─── PATs (ADR 0016, v0.3) ───
+
+    def create_pat(
+        self,
+        usr_id: str,
+        name: str,
+        scope: list[str],
+        *,
+        expires_at: datetime | None = None,
+    ) -> CreatePatResult:
+        self._require_user(usr_id)
+        name_len = len(name)
+        if name_len < 1 or name_len > 120:
+            raise PreconditionError("name must be 1–120 code units", reason="invalid_name")
+        now = self._now()
+        if expires_at is not None:
+            if expires_at <= now:
+                raise PreconditionError("expires_at must be in the future", reason="expires_in_past")
+            max_exp = now + timedelta(seconds=PAT_MAX_LIFETIME_SECONDS)
+            if expires_at > max_exp:
+                raise PreconditionError("expires_at exceeds 365-day cap", reason="expires_too_late")
+        pat_id = generate("pat")
+        secret_bytes = secrets.token_bytes(32)
+        secret = base64.urlsafe_b64encode(secret_bytes).rstrip(b"=").decode("ascii")
+        phc = hash_password(secret)
+        token = pat_id + "_" + secret
+        pat = PersonalAccessToken(
+            id=pat_id,
+            usr_id=usr_id,
+            name=name,
+            scope=list(scope),
+            status=PatStatus.ACTIVE,
+            expires_at=expires_at,
+            created_at=now,
+            updated_at=now,
+        )
+        self._pats[pat_id] = pat
+        self._pat_secret_hashes[pat_id] = phc
+        return CreatePatResult(pat=pat, token=token)
+
+    def get_pat(self, pat_id: str) -> PersonalAccessToken:
+        pat = self._pats.get(pat_id)
+        if pat is None:
+            raise NotFoundError(f"PAT {pat_id} not found")
+        return pat
+
+    def list_pats_for_user(
+        self,
+        usr_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[PersonalAccessToken]:
+        self._require_user(usr_id)
+        if limit <= 0:
+            limit = 50
+        matched = sorted(
+            (p for p in self._pats.values() if p.usr_id == usr_id),
+            key=lambda p: (p.created_at, p.id),
+        )
+        start = 0
+        if cursor:
+            for i, p in enumerate(matched):
+                if p.id == cursor:
+                    start = i + 1
+                    break
+        page = matched[start : start + limit]
+        next_cursor = page[-1].id if len(matched) > start + limit and page else None
+        return Page(data=page, next_cursor=next_cursor)
+
+    def verify_pat_token(self, token: str) -> VerifiedPat:
+        # Step 1: structural check. Run dummy verify to keep wall-clock indistinguishable.
+        if not is_structurally_valid_pat_token(token):
+            verify_password_hash(PAT_DUMMY_PHC_HASH, token)
+            raise InvalidPatTokenError()
+
+        # Step 2: positional parse per ADR 0016 (NOT split-on-underscore;
+        # base64url secret may contain '_'). Wire: pat_<32hex>_<secret>
+        # "pat_" = 4 chars, 32 hex = chars 4–35, "_" at 36, secret at 37+.
+        pat_id = token[:36]
+        secret = token[37:]
+
+        # H6: length cap before Argon2id (DoS guard).
+        if len(secret) > PAT_MAX_SECRET_LENGTH:
+            verify_password_hash(PAT_DUMMY_PHC_HASH, "")
+            raise InvalidPatTokenError()
+
+        # Step 3: lookup.
+        pat = self._pats.get(pat_id)
+        if pat is None:
+            # H2: timing-oracle defense — dummy verify regardless of miss reason.
+            verify_password_hash(PAT_DUMMY_PHC_HASH, secret)
+            raise InvalidPatTokenError()
+
+        # Step 4: revoked check.
+        if pat.revoked_at is not None:
+            raise PatRevokedError(pat_id)
+
+        # Step 5: expiry check.
+        now = self._now()
+        if pat.expires_at is not None and now >= pat.expires_at:
+            raise PatExpiredError(pat_id)
+
+        # Step 6: Argon2id verify (constant-time by construction).
+        phc = self._pat_secret_hashes[pat_id]
+        ok = verify_password_hash(phc, secret)
+        if not ok:
+            raise InvalidPatTokenError()
+
+        # Step 7: update last_used_at with coalescing.
+        prev = self._pat_last_used_persist.get(pat_id)
+        if prev is None or (now - prev).total_seconds() >= self._pat_last_used_coalesce_seconds:
+            current = self._pats.get(pat_id)
+            if current is not None and current.revoked_at is None:
+                self._pats[pat_id] = PersonalAccessToken(
+                    id=current.id,
+                    usr_id=current.usr_id,
+                    name=current.name,
+                    scope=list(current.scope),
+                    status=current.status,
+                    expires_at=current.expires_at,
+                    last_used_at=now,
+                    revoked_at=current.revoked_at,
+                    created_at=current.created_at,
+                    updated_at=now,
+                )
+                self._pat_last_used_persist[pat_id] = now
+
+        return VerifiedPat(pat_id=pat_id, usr_id=pat.usr_id, scope=list(pat.scope))
+
+    def revoke_pat(self, pat_id: str) -> PersonalAccessToken:
+        pat = self._pats.get(pat_id)
+        if pat is None:
+            raise NotFoundError(f"PAT {pat_id} not found")
+        if pat.revoked_at is not None:
+            return pat
+        now = self._now()
+        revoked = PersonalAccessToken(
+            id=pat.id,
+            usr_id=pat.usr_id,
+            name=pat.name,
+            scope=list(pat.scope),
+            status=PatStatus.REVOKED,
+            expires_at=pat.expires_at,
+            last_used_at=pat.last_used_at,
+            revoked_at=now,
+            created_at=pat.created_at,
+            updated_at=now,
+        )
+        self._pats[pat_id] = revoked
+        return revoked
