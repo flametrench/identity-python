@@ -238,6 +238,13 @@ def test_verify_password_wrong_rejected(store):
         store.verify_password("alice@example.com", "wrong")
 
 
+def test_verify_password_unknown_identifier_raises_not_reveals(store):
+    # ADR 0023 / identity-python#1: missing-identifier path must raise
+    # InvalidCredentialError (not a different error type that leaks existence).
+    with pytest.raises(InvalidCredentialError):
+        store.verify_password("nobody@example.com", "pw")
+
+
 def test_duplicate_active_credential_rejected(store):
     u = store.create_user()
     store.create_password_credential(u.id, "alice@example.com", "p1")

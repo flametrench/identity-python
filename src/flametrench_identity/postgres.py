@@ -70,6 +70,7 @@ from .types import (
     Credential,
     CredentialType,
     OidcCredential,
+    PAT_DUMMY_PHC_HASH,
     Page,
     PasskeyCredential,
     PasswordCredential,
@@ -860,6 +861,9 @@ class PostgresIdentityStore:
             )
             row = cur.fetchone()
         if row is None or row[6] is None:
+            # ADR 0023 §timing-oracle defense: dummy verify so "unknown identifier"
+            # is wall-clock-indistinguishable from "bad password" (identity-python#1).
+            verify_password_hash(PAT_DUMMY_PHC_HASH, password)
             raise InvalidCredentialError("Invalid credential")
         if not verify_password_hash(str(row[6]), password):
             raise InvalidCredentialError("Invalid credential")
