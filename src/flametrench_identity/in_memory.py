@@ -665,6 +665,9 @@ class InMemoryIdentityStore:
             self._identifier_key(CredentialType.PASSWORD, identifier)
         )
         if cred_id is None:
+            # ADR 0023 §timing-oracle defense: run dummy Argon2id so wall-clock
+            # time on "unknown identifier" is indistinguishable from "bad password".
+            verify_password_hash(PAT_DUMMY_PHC_HASH, password)
             raise InvalidCredentialError()
         cred = self._require_credential(cred_id)
         if not isinstance(cred, PasswordCredential):
