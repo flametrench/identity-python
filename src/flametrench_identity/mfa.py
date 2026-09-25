@@ -293,16 +293,58 @@ def totp_verify(
         raise ValueError(
             f"drift_windows must be 0..10, got {drift_windows}"
         )
+    return (
+        totp_match_step(
+            secret,
+            candidate,
+            timestamp=timestamp,
+            period=period,
+            digits=digits,
+            algorithm=algorithm,
+            drift_windows=drift_windows,
+        )
+        is not None
+    )
+
+
+def totp_match_step(
+    secret: bytes,
+    candidate: str,
+    *,
+    timestamp: int | None = None,
+    period: int = DEFAULT_TOTP_PERIOD,
+    digits: int = DEFAULT_TOTP_DIGITS,
+    algorithm: Literal["sha1", "sha256", "sha512"] = DEFAULT_TOTP_ALGORITHM,
+    drift_windows: int = 1,
+) -> int | None:
+    """Like :func:`totp_verify`, but return the matched time-step counter.
+
+    The time-step is ``floor(unix_time / period)`` of the window whose
+    code matched, or ``None`` on no match. Stores use it for replay
+    protection (ADR 0008 §verifyMfa): a factor records the step of its
+    last accepted code and rejects any matched step at or below it.
+
+    Every window in the drift radius is computed and compared, so the
+    work is constant regardless of which window matched. If more than
+    one window happens to produce the candidate, the highest step wins.
+    """
+    if timestamp is None:
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+    if drift_windows < 0 or drift_windows > 10:
+        raise ValueError(
+            f"drift_windows must be 0..10, got {drift_windows}"
+        )
     if not candidate or len(candidate) != digits or not candidate.isdigit():
-        return False
+        return None
+    matched: int | None = None
     for window_offset in range(-drift_windows, drift_windows + 1):
         ts = timestamp + window_offset * period
         expected = totp_compute(
             secret, ts, period=period, digits=digits, algorithm=algorithm
         )
         if hmac.compare_digest(expected, candidate):
-            return True
-    return False
+            matched = ts // period
+    return matched
 
 
 def generate_totp_secret(*, num_bytes: int = 20) -> bytes:

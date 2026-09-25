@@ -42,6 +42,20 @@ class InvalidCredentialError(IdentityError):
         super().__init__(message, code="invalid_credential")
 
 
+class ReplayedTotpError(InvalidCredentialError):
+    """The TOTP code matched, but its time-step was already consumed.
+
+    ADR 0008 §verifyMfa replay protection: each factor records the step
+    of its last accepted code and rejects any matched step at or below
+    it. Subclasses InvalidCredentialError so callers that already treat
+    a bad code as a failed verification keep doing so.
+    """
+
+    def __init__(self, message: str = "TOTP code was already used") -> None:
+        super().__init__(message)
+        self.code = "replayed_totp"
+
+
 class InvalidTokenError(IdentityError):
     """The bearer token is unknown or malformed."""
 

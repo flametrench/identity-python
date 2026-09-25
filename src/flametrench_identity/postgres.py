@@ -37,6 +37,7 @@ from .errors import (
     InvalidTokenError,
     NotFoundError,
     PreconditionError,
+    ReplayedTotpError,
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
@@ -63,8 +64,8 @@ from .mfa import (
     generate_totp_secret,
     is_valid_recovery_code,
     normalize_recovery_input,
+    totp_match_step,
     totp_otpauth_uri,
-    totp_verify,
 )
 from .types import (
     Credential,
@@ -868,6 +869,14 @@ class PostgresIdentityStore:
         if not verify_password_hash(str(row[6]), password):
             raise InvalidCredentialError("Invalid credential")
         usr_uuid = str(row[1])
+        # A suspended user cannot authenticate (identity.md §Lifecycle).
+        # Checked AFTER the hash so status is neither a timing nor an
+        # error-shape oracle: every failure is the same generic error.
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT status FROM usr WHERE id = %s", (usr_uuid,))
+            usr_row = cur.fetchone()
+        if usr_row is None or usr_row[0] != Status.ACTIVE.value:
+            raise InvalidCredentialError("Invalid credential")
         # ADR 0008: surface usr_mfa_policy state. Applications MUST
         # gate create_session on mfa_required by calling verify_mfa
         # first when this is true.
@@ -1167,17 +1176,39 @@ class PostgresIdentityStore:
         consumed = [False] * len(codes)
         mfa_uuid = _decode(_generate("mfa")).uuid
         try:
-            with self._conn.transaction():
-                with self._conn.cursor() as cur:
+            with self._tx() as conn:
+                # ADR 0008 §Verification flow: once every code is consumed,
+                # re-enrollment generates a fresh set and revokes the old
+                # one, in this transaction. Re-enrolling over a set with
+                # codes left still hits the singleton index and is refused.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, recovery_consumed FROM mfa
+                        WHERE usr_id = %s AND type = 'recovery' AND status = 'active'
+                        FOR UPDATE
+                        """,
+                        (usr_uuid,),
+                    )
+                    current = cur.fetchone()
+                replaces = None
+                if current is not None and all(current[1] or []):
+                    replaces = current[0]
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE mfa SET status = 'revoked' WHERE id = %s",
+                            (replaces,),
+                        )
+                with conn.cursor() as cur:
                     cur.execute(
                         f"""
-                        INSERT INTO mfa (id, usr_id, type, status,
+                        INSERT INTO mfa (id, usr_id, type, status, replaces,
                                          recovery_hashes, recovery_consumed,
                                          created_at, updated_at)
-                        VALUES (%s, %s, 'recovery', 'active', %s, %s, %s, %s)
+                        VALUES (%s, %s, 'recovery', 'active', %s, %s, %s, %s, %s)
                         RETURNING {_MFA_COLS}
                         """,
-                        (mfa_uuid, usr_uuid, hashes, consumed, now, now),
+                        (mfa_uuid, usr_uuid, replaces, hashes, consumed, now, now),
                     )
                     row = cur.fetchone()
             assert row is not None
@@ -1248,15 +1279,19 @@ class PostgresIdentityStore:
                 )
             self._check_pending_not_expired(row)
             secret = _to_bytes(row[6]) if row[6] is not None else b""
-            if not totp_verify(secret, code, timestamp=int(self._now().timestamp())):
+            step = totp_match_step(secret, code, timestamp=int(self._now().timestamp()))
+            if step is None:
                 raise InvalidCredentialError("TOTP code did not verify")
+            # Confirmation consumes its code: verify_mfa shares this state.
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    UPDATE mfa SET status = 'active', pending_expires_at = NULL WHERE id = %s
+                    UPDATE mfa SET status = 'active', pending_expires_at = NULL,
+                                   totp_last_accepted_step = %s
+                    WHERE id = %s
                     RETURNING {_MFA_COLS}
                     """,
-                    (row[0],),
+                    (step, row[0]),
                 )
                 updated = cur.fetchone()
         assert updated is not None
@@ -1336,20 +1371,44 @@ class PostgresIdentityStore:
         raise InvalidCredentialError("Unsupported MFA proof type")
 
     def _verify_totp_proof(self, usr_id: str, code: str) -> MfaVerifyResult:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT {_MFA_COLS} FROM mfa
-                WHERE usr_id = %s AND type = 'totp' AND status = 'active'
-                """,
-                (_wire_to_uuid(usr_id),),
-            )
-            row = cur.fetchone()
-        if row is None:
-            raise InvalidCredentialError("No active TOTP factor for user")
-        secret = _to_bytes(row[6]) if row[6] is not None else b""
-        if not totp_verify(secret, code, timestamp=int(self._now().timestamp())):
-            raise InvalidCredentialError("TOTP code did not verify")
+        with self._tx() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_MFA_COLS} FROM mfa
+                    WHERE usr_id = %s AND type = 'totp' AND status = 'active'
+                    """,
+                    (_wire_to_uuid(usr_id),),
+                )
+                row = cur.fetchone()
+            if row is None:
+                raise InvalidCredentialError("No active TOTP factor for user")
+            secret = _to_bytes(row[6]) if row[6] is not None else b""
+            step = totp_match_step(secret, code, timestamp=int(self._now().timestamp()))
+            if step is None:
+                raise InvalidCredentialError("TOTP code did not verify")
+            # Replay guard (ADR 0008 §verifyMfa, design 3A): one conditional
+            # UPDATE both checks and advances the factor's last accepted
+            # step (never read-then-write), so two concurrent verifies of
+            # one code cannot both succeed.
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE mfa SET totp_last_accepted_step = %s
+                    WHERE id = %s AND status = 'active'
+                      AND (totp_last_accepted_step IS NULL
+                           OR totp_last_accepted_step < %s)
+                    RETURNING id
+                    """,
+                    (step, row[0], step),
+                )
+                if cur.fetchone() is None:
+                    # Only picks the error; the UPDATE above is the guard.
+                    cur.execute("SELECT status FROM mfa WHERE id = %s", (row[0],))
+                    still = cur.fetchone()
+                    if still is None or still[0] != FactorStatus.ACTIVE.value:
+                        raise InvalidCredentialError("No active TOTP factor for user")
+                    raise ReplayedTotpError()
         return MfaVerifyResult(
             mfa_id=_encode("mfa", str(row[0])),
             type=FactorType.TOTP,
