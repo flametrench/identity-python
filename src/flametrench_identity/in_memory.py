@@ -1117,7 +1117,7 @@ class InMemoryIdentityStore:
         step = totp_match_step(secret, code, timestamp=int(self._now().timestamp()))
         if step is None:
             raise InvalidCredentialError("TOTP code did not verify")
-        # Replay guard (ADR 0008 §verifyMfa, design 3A): reject any step at
+        # Replay guard (ADR 0008 §verifyMfa): reject any step at
         # or below the factor's last accepted step, then advance it. Check
         # and advance happen with no intervening yield.
         last = self._mfa_totp_last_step.get(mfa_id)

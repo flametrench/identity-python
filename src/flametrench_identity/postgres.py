@@ -1387,7 +1387,7 @@ class PostgresIdentityStore:
             step = totp_match_step(secret, code, timestamp=int(self._now().timestamp()))
             if step is None:
                 raise InvalidCredentialError("TOTP code did not verify")
-            # Replay guard (ADR 0008 §verifyMfa, design 3A): one conditional
+            # Replay guard (ADR 0008 §verifyMfa): one conditional
             # UPDATE both checks and advances the factor's last accepted
             # step (never read-then-write), so two concurrent verifies of
             # one code cannot both succeed.

@@ -478,8 +478,8 @@ CREATE TABLE mfa (
     -- 0008: with the ±1 drift window, a consumed code(N) can be replayed at
     -- step N+1 after code(N+1) was accepted. With this single column the only
     -- sound rule is to reject any matched step <= this value — which also
-    -- rejects never-used older codes (design 3A, pending acceptance in the
-    -- ADR 0008 amendment). An implementation that does NOT adopt the <= rule
+    -- rejects never-used older codes (a stricter rule pending as a spec
+    -- change to ADR 0008). An implementation that does NOT adopt the <= rule
     -- MUST instead track every accepted step still inside the drift window
     -- (this column alone cannot express that).
     totp_last_accepted_step BIGINT

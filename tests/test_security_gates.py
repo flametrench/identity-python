@@ -142,7 +142,7 @@ def test_totp_match_step_returns_matched_window() -> None:
     assert totp_match_step(secret, "abcdef", timestamp=ts) is None
 
 
-# ─── TOTP replay (ADR 0008 §verifyMfa, design 3A) ───
+# ─── TOTP replay (ADR 0008 §verifyMfa) ───
 
 
 def test_replayed_totp_error_is_an_invalid_credential() -> None:
