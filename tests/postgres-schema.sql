@@ -466,22 +466,20 @@ CREATE TABLE mfa (
                        CHECK (totp_digits IS NULL OR totp_digits BETWEEN 6 AND 10),
     totp_period      SMALLINT
                        CHECK (totp_period IS NULL OR totp_period BETWEEN 15 AND 120),
-    -- TOTP replay protection (ADR 0008 §verifyMfa: "rejects code reuse via a
-    -- per-(usr_id, code, time-step) deduplication index"). The time-step
-    -- counter (floor(unix_time / totp_period)) of the most recently ACCEPTED
-    -- code for this factor; NULL until the first successful verify (confirm
-    -- counts). Updated in the same transaction as the acceptance, under a row
-    -- lock (SELECT ... FOR UPDATE), so two concurrent verifies of one code
-    -- cannot both succeed.
+    -- TOTP replay protection (ADR 0027, amending ADR 0008 §verifyMfa). The
+    -- time-step counter (floor(unix_time / totp_period)) of the most recently
+    -- ACCEPTED code for this factor; NULL until the first successful verify
+    -- (confirm counts). Updated in the same transaction as the acceptance,
+    -- under a row lock (SELECT ... FOR UPDATE), so two concurrent verifies of
+    -- one code cannot both succeed.
     --
-    -- Rejecting only a step EQUAL to this value is NOT sufficient for ADR
-    -- 0008: with the ±1 drift window, a consumed code(N) can be replayed at
-    -- step N+1 after code(N+1) was accepted. With this single column the only
-    -- sound rule is to reject any matched step <= this value — which also
-    -- rejects never-used older codes (a stricter rule pending as a spec
-    -- change to ADR 0008). An implementation that does NOT adopt the <= rule
-    -- MUST instead track every accepted step still inside the drift window
-    -- (this column alone cannot express that).
+    -- A presented code whose matched step is <= this value MUST be rejected
+    -- (ReplayedTotpError). This also rejects never-used older codes inside
+    -- the ±1 drift window. Rejecting only an EQUAL step is not sufficient: a
+    -- consumed code(N) could be replayed at step N+1 after code(N+1) was
+    -- accepted. On a multi-step match, the highest matched step is compared
+    -- and recorded. Extra state MAY be kept, but everything this rule rejects
+    -- MUST still be rejected (ADR 0027 decision 4).
     totp_last_accepted_step BIGINT
                        CHECK (totp_last_accepted_step IS NULL OR totp_last_accepted_step >= 0),
 
