@@ -36,6 +36,7 @@ from .errors import (
     PatExpiredError,
     PatRevokedError,
     PreconditionError,
+    ReplayedTotpError,
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
@@ -59,8 +60,8 @@ from .mfa import (
     generate_totp_secret,
     is_valid_recovery_code,
     normalize_recovery_input,
+    totp_match_step,
     totp_otpauth_uri,
-    totp_verify,
 )
 from .types import (
     CreatePatResult,
@@ -133,6 +134,8 @@ class InMemoryIdentityStore:
         # ─── v0.2 MFA (ADR 0008) ───
         self._mfa_factors: dict[str, "Factor"] = {}
         self._mfa_totp_secrets: dict[str, bytes] = {}  # mfa_id → raw secret
+        # mfa_id → time-step of the last accepted TOTP code (replay guard)
+        self._mfa_totp_last_step: dict[str, int] = {}
         self._mfa_webauthn_keys: dict[str, bytes] = {}  # mfa_id → COSE pubkey
         self._mfa_recovery_hashes: dict[str, list[str]] = {}  # mfa_id → 10 PHC
         self._mfa_recovery_consumed: dict[str, list[bool]] = {}  # parallel array
@@ -676,6 +679,11 @@ class InMemoryIdentityStore:
         phc = self._password_hashes.get(cred_id)
         if phc is None or not verify_password_hash(phc, password):
             raise InvalidCredentialError()
+        # A suspended user cannot authenticate (identity.md §Lifecycle).
+        # Checked AFTER the hash so status is neither a timing nor an
+        # error-shape oracle: every failure is the same generic error.
+        if self._require_user(cred.usr_id).status != Status.ACTIVE:
+            raise InvalidCredentialError()
         # ADR 0008: surface usr_mfa_policy state.
         policy = self._mfa_policies.get(cred.usr_id)
         mfa_required = False
@@ -773,10 +781,20 @@ class InMemoryIdentityStore:
             raise SessionExpiredError("Session is revoked")
         if self._now() > session.expires_at:
             raise SessionExpiredError("Session has expired")
+        # ADR 0029 backstop for a session that escaped the suspend/revoke
+        # cascade: conflated with any other invalid token.
+        if self._require_user(session.usr_id).status != Status.ACTIVE:
+            raise InvalidTokenError()
         return session
 
     def refresh_session(self, ses_id: str) -> SessionWithToken:
         session = self._require_session(ses_id)
+        # ADR 0029: no new session for a non-active user.
+        if self._require_user(session.usr_id).status != Status.ACTIVE:
+            raise PreconditionError(
+                "Cannot refresh session for a non-active user",
+                reason="user_not_active",
+            )
         if session.revoked_at is not None:
             raise SessionExpiredError("Session is already revoked")
         if self._now() > session.expires_at:
@@ -949,7 +967,15 @@ class InMemoryIdentityStore:
         recovery factor per user).
         """
         self._check_user_active(usr_id)
-        self._enforce_no_active_singleton(usr_id, FactorType.RECOVERY)
+        # ADR 0008 §Verification flow: once every code is consumed,
+        # re-enrollment generates a fresh set and revokes the old one.
+        # Re-enrolling over a set with codes left is still refused.
+        replaces: str | None = None
+        current_id = self._mfa_active_singleton.get(f"{usr_id}|recovery")
+        if current_id is not None and all(self._mfa_recovery_consumed[current_id]):
+            replaces = current_id
+        else:
+            self._enforce_no_active_singleton(usr_id, FactorType.RECOVERY)
         now = self._now()
         codes = generate_recovery_codes()
         hashes = [hash_password(code) for code in codes]
@@ -959,11 +985,15 @@ class InMemoryIdentityStore:
             id=mfa_id,
             usr_id=usr_id,
             status=FactorStatus.ACTIVE,
-            replaces=None,
+            replaces=replaces,
             created_at=now,
             updated_at=now,
             remaining=len(codes),
         )
+        if replaces is not None:
+            self._mfa_factors[replaces] = self._with_factor_status(
+                self._mfa_factors[replaces], FactorStatus.REVOKED
+            )
         self._mfa_factors[mfa_id] = factor
         self._mfa_recovery_hashes[mfa_id] = hashes
         self._mfa_recovery_consumed[mfa_id] = consumed
@@ -991,8 +1021,11 @@ class InMemoryIdentityStore:
             )
         self._check_pending_not_expired(factor)
         secret = self._mfa_totp_secrets[mfa_id]
-        if not totp_verify(secret, code, timestamp=int(self._now().timestamp())):
+        step = totp_match_step(secret, code, timestamp=int(self._now().timestamp()))
+        if step is None:
             raise InvalidCredentialError("TOTP code did not verify")
+        # Confirmation consumes its code: verify_mfa shares this state.
+        self._mfa_totp_last_step[mfa_id] = step
         active = TotpFactor(
             id=factor.id,
             usr_id=factor.usr_id,
@@ -1086,13 +1119,30 @@ class InMemoryIdentityStore:
             return self._verify_recovery(usr_id, proof.code)
         raise TypeError(f"Unknown proof type: {type(proof).__name__}")
 
+    def _refuse_mfa_unless_active(self, usr_id: str, message: str) -> None:
+        # ADR 0029: a non-active user's valid proof is refused with the
+        # same error and message as a failed proof, so status is no
+        # oracle. Called after the proof verifies and before anything is
+        # consumed, so a refusal changes nothing.
+        if self._require_user(usr_id).status != Status.ACTIVE:
+            raise InvalidCredentialError(message)
+
     def _verify_totp(self, usr_id: str, code: str) -> MfaVerifyResult:
         mfa_id = self._mfa_active_singleton.get(f"{usr_id}|totp")
         if mfa_id is None:
             raise InvalidCredentialError("No active TOTP factor for user")
         secret = self._mfa_totp_secrets[mfa_id]
-        if not totp_verify(secret, code, timestamp=int(self._now().timestamp())):
+        step = totp_match_step(secret, code, timestamp=int(self._now().timestamp()))
+        if step is None:
             raise InvalidCredentialError("TOTP code did not verify")
+        # Replay guard (ADR 0008 §verifyMfa): reject any step at
+        # or below the factor's last accepted step, then advance it. Check
+        # and advance happen with no intervening yield.
+        last = self._mfa_totp_last_step.get(mfa_id)
+        if last is not None and step <= last:
+            raise ReplayedTotpError()
+        self._refuse_mfa_unless_active(usr_id, "TOTP code did not verify")
+        self._mfa_totp_last_step[mfa_id] = step
         return MfaVerifyResult(
             mfa_id=mfa_id,
             type=FactorType.TOTP,
@@ -1128,6 +1178,7 @@ class InMemoryIdentityStore:
             client_data_json=proof.client_data_json,
             signature=proof.signature,
         )
+        self._refuse_mfa_unless_active(usr_id, "WebAuthn assertion did not verify")
         # Persist the advanced counter atomically with the verify.
         updated = WebAuthnFactor(
             id=factor.id,
@@ -1169,6 +1220,7 @@ class InMemoryIdentityStore:
                 matched_slot = i
         if matched_slot == -1:
             raise InvalidCredentialError("Recovery code did not verify")
+        self._refuse_mfa_unless_active(usr_id, "Recovery code did not verify")
         # Consume the matched slot.
         consumed[matched_slot] = True
         # Update the public RecoveryFactor's `remaining`.
@@ -1278,7 +1330,13 @@ class InMemoryIdentityStore:
         *,
         expires_at: datetime | None = None,
     ) -> CreatePatResult:
-        self._require_user(usr_id)
+        # ADR 0029: no PAT is issued to a non-active (suspended or revoked) usr.
+        user = self._require_user(usr_id)
+        if user.status != Status.ACTIVE:
+            raise PreconditionError(
+                f"Cannot create PAT for {user.status.value} user {usr_id}",
+                reason="user_not_active",
+            )
         name_len = len(name)
         if name_len < 1 or name_len > 120:
             raise PreconditionError("name must be 1–120 code units", reason="invalid_name")
@@ -1375,6 +1433,15 @@ class InMemoryIdentityStore:
         phc = self._pat_secret_hashes[pat_id]
         ok = verify_password_hash(phc, secret)
         if not ok:
+            raise InvalidPatTokenError()
+
+        # Step 6b: a PAT authenticates its owner, and a non-active owner
+        # cannot authenticate (identity.md §Lifecycle). Suspension is
+        # reversible, so this is checked at verify time rather than by
+        # revoking the PAT. The error is the generic one so the owner's
+        # status is not disclosed.
+        owner = self._users.get(pat.usr_id)
+        if owner is None or owner.status != Status.ACTIVE:
             raise InvalidPatTokenError()
 
         # Step 7: update last_used_at with coalescing.

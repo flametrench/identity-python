@@ -3,6 +3,18 @@
 All notable changes to `flametrench-identity` are recorded here.
 Spec-level changes live in [`spec/CHANGELOG.md`](https://github.com/flametrench/spec/blob/main/CHANGELOG.md).
 
+## [Unreleased]
+
+### Fixed
+- **TOTP replay protection** (ADR 0008 §verifyMfa). Each TOTP factor records the time-step of its last accepted code and rejects any matched step at or below it, raising the new `ReplayedTotpError` (a subclass of `InvalidCredentialError`, error code `unauthorized.totp_replayed` per ADR 0027). `confirm_totp_factor` consumes its code too, so the confirmation code cannot then be used with `verify_mfa`. `PostgresIdentityStore` checks and advances the step in one conditional `UPDATE`, so two concurrent verifies of one code cannot both succeed. New helper: `totp_match_step`.
+  - **Requires the schema column `mfa.totp_last_accepted_step`**, added by `spec/reference/migrations/0001-mfa-totp-last-accepted-step.sql`. **Run the migration before deploying this version.**
+- `verify_password` refuses a suspended user with the same generic `InvalidCredentialError` as a bad password. Status is checked after the Argon2id verify, so it is neither a timing nor an error-shape oracle.
+- `verify_mfa` refuses a suspended or revoked user's valid TOTP, WebAuthn or recovery proof with `InvalidCredentialError`, using the same message as a failed proof (ADR 0029). Status is checked after the proof verifies, and nothing is consumed: no TOTP step, sign count or recovery slot.
+- Sessions stop working for a non-active user (ADR 0029). `verify_session_token` refuses a live session whose user is suspended or revoked with `InvalidTokenError`. `refresh_session` refuses with `PreconditionError` (reason `user_not_active`), checked before the session's own state. `PostgresIdentityStore.create_session` reads the user `FOR SHARE`, so a session can't be created across a concurrent suspend or revoke. A reinstated user's unexpired sessions work again.
+- **Recommended one-time clean-up after upgrading:** revoke the PATs and sessions of every user who is already suspended or revoked.
+- `InMemoryIdentityStore.verify_pat_token` refuses a PAT whose owner is not active (`InvalidPatTokenError`). The check runs at verify time, so the same token works again after `reinstate_user`. `create_pat` refuses a suspended or revoked user (`PreconditionError`, reason `user_not_active`; ADR 0029).
+- `enroll_recovery_factor` replaces an exhausted recovery set (all codes consumed): the old factor is revoked and the new one `replaces` it. Re-enrolling over a set with codes left is still refused (`active_singleton_exists`).
+
 ## [v0.3.0] — 2026-06-06
 
 ### Released

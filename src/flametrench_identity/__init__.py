@@ -25,6 +25,7 @@ from .errors import (
     PatExpiredError,
     PatRevokedError,
     PreconditionError,
+    ReplayedTotpError,
     SessionExpiredError,
 )
 from .hashing import hash_password, verify_password_hash
@@ -57,6 +58,7 @@ from .mfa import (
     normalize_recovery_input,
     totp_compute,
     totp_otpauth_uri,
+    totp_match_step,
     totp_verify,
 )
 from .store import IdentityStore
@@ -138,6 +140,7 @@ __all__ = [
     "PersonalAccessToken",
     "PasswordCredential",
     "PreconditionError",
+    "ReplayedTotpError",
     "RECOVERY_CODE_COUNT",
     "RECOVERY_CODE_LENGTH",
     "RecoveryEnrollmentResult",
@@ -180,6 +183,7 @@ __all__ = [
     "normalize_recovery_input",
     "totp_compute",
     "totp_otpauth_uri",
+    "totp_match_step",
     "totp_verify",
     "verify_password_hash",
     "webauthn_verify_assertion",

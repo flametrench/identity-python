@@ -185,9 +185,10 @@ def test_totp_verify_after_confirm() -> None:
     store.confirm_totp_factor(
         enroll.factor.id, totp_compute(secret, int(clock().timestamp()))
     )
-    # Now verify_mfa succeeds.
+    # The confirm code is consumed (ADR 0008 replay protection): a code
+    # from the next time-step verifies.
     result = store.verify_mfa(
-        user.id, TotpProof(code=totp_compute(secret, int(clock().timestamp())))
+        user.id, TotpProof(code=totp_compute(secret, int(clock().timestamp()) + 30))
     )
     assert result.type == FactorType.TOTP
     assert result.mfa_id == enroll.factor.id

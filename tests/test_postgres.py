@@ -339,10 +339,13 @@ def test_totp_enroll_confirm_verify_round_trip(store):
     assert enroll.factor.status == FactorStatus.PENDING
     secret = _b32_decode(enroll.secret_b32)
     assert enroll.otpauth_uri.startswith("otpauth://totp/")
-    code = totp_compute(secret, int(time.time()))
-    active = store.confirm_totp_factor(enroll.factor.id, code)
+    now = int(time.time())
+    # Confirm with the previous window's code (inside the ±1 drift) so the
+    # current window's code is a later, unconsumed step.
+    confirm_code = totp_compute(secret, now - 30)
+    active = store.confirm_totp_factor(enroll.factor.id, confirm_code)
     assert active.status == FactorStatus.ACTIVE
-    result = store.verify_mfa(u.id, TotpProof(code=code))
+    result = store.verify_mfa(u.id, TotpProof(code=totp_compute(secret, now)))
     assert result.type == FactorType.TOTP
     assert result.mfa_id == active.id
 

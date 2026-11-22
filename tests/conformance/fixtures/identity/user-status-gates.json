@@ -1,0 +1,603 @@
+{
+  "$schema": "../../fixture.schema.json",
+  "spec_version": "0.3.0",
+  "capability": "identity",
+  "operation": "verify_password",
+  "conformance_level": "MUST",
+  "spec_section": "docs/identity.md#lifecycle",
+  "description": "User status is honoured at authentication and issuance time (ADR 0029; `docs/identity.md` \u00a7Lifecycle): no operation that authenticates a principal, or issues something that will later authenticate one, succeeds for a non-`active` user. Every refusal arm is paired with a reinstate-and-succeed arm (the known positive: suspension is reversible, so the gate is evaluated at verify/issue time, not by cascade). ERROR NAMES (pinned by ADR 0029's table): `verifyPassword` \u2192 `InvalidCredentialError` (no user-status oracle); `createSession` and `createPat` \u2192 `PreconditionError`; `verifyPatToken` for a suspended owner \u2192 `InvalidPatTokenError` (conflated, so status is not disclosed); a PAT revoked with its owner \u2192 `PatRevokedError` (ADR 0016). `verifyMfa` \u2192 `InvalidCredentialError` (conflated with proof failure). The `verify_mfa` vectors use the same harness pseudo-ops as `identity/mfa/totp-replay-rejected.json` (`set_clock`, `compute_totp_code`) with `enroll_totp_factor` / `confirm_totp_factor`. NOT asserted in this file: the `refreshSession` and `verifySessionToken` arms ADR 0029 lists, which need harness ops not yet in the fixture vocabulary (`refresh_session`, `verify_session_token`). PAT CASCADE: the vector asserts ADR 0016 \u00a7Constraints' behaviour ('PATs auto-revoke when their owner is revoked'); the text is inconsistent about WHERE the cascade lives (0016 names `cascadeRevokeSubject`, which authorization.md defines as a tuple delete; identity.md \u00a7Operations lists revokeUser's cascades without PATs) \u2014 noted for reconciliation. Harness op `revoke_user` MUST invoke only the SDK's user-revocation operation (`revokeUser`), with no extra cascade call, so the vector tests that revoking a user is sufficient. Harness op `reinstate_user` maps to `reinstateUser`.",
+  "tests": [
+    {
+      "id": "user_status.verify_password.suspended_refused",
+      "description": "A suspended user's correct password is refused.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "sus@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_password",
+          "input": {
+            "identifier": "sus@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "expected": {
+            "error": "InvalidCredentialError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_password.reinstated_ok",
+      "description": "Known positive: suspend then reinstate; the correct password verifies.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "back@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "reinstate_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_password",
+          "input": {
+            "identifier": "back@example.com",
+            "password": "long-enough-password-for-floor"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_password.revoked_refused",
+      "description": "A revoked user's correct password is refused.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "gone@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "revoke_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_password",
+          "input": {
+            "identifier": "gone@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "expected": {
+            "error": "InvalidCredentialError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_session.suspended_refused",
+      "description": "No session may be issued to a suspended user (`PreconditionError`, ADR 0029).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "s2@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id",
+            "cred_id": "credential.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_session",
+          "input": {
+            "usr_id": "{usr_id}",
+            "cred_id": "{cred_id}",
+            "ttl_seconds": 3600
+          },
+          "expected": {
+            "error": "PreconditionError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_session.reinstated_ok",
+      "description": "Known positive: after reinstate a session is issued.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "s3@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id",
+            "cred_id": "credential.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "reinstate_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_session",
+          "input": {
+            "usr_id": "{usr_id}",
+            "cred_id": "{cred_id}",
+            "ttl_seconds": 3600
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_session.revoked_refused",
+      "description": "No session may be issued to a revoked user (`PreconditionError`, ADR 0029).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "s4@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id",
+            "cred_id": "credential.id"
+          }
+        },
+        {
+          "op": "revoke_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_session",
+          "input": {
+            "usr_id": "{usr_id}",
+            "cred_id": "{cred_id}",
+            "ttl_seconds": 3600
+          },
+          "expected": {
+            "error": "PreconditionError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_pat.suspended_owner_refused",
+      "description": "A PAT whose owner is suspended does not authenticate (`InvalidPatTokenError`, conflated so status is not disclosed; ADR 0029).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "captures": {
+            "token": "token"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_pat_token",
+          "input": {
+            "token": "{token}"
+          },
+          "expected": {
+            "error": "InvalidPatTokenError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_pat.reinstated_owner_ok",
+      "description": "Known positive: suspension is reversible \u2014 after reinstate the SAME token verifies (the gate is evaluated at verify time, not by revoking the PAT).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "captures": {
+            "token": "token"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "reinstate_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_pat_token",
+          "input": {
+            "token": "{token}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.revoke_user.cascades_to_pats",
+      "description": "ADR 0016 \u00a7Constraints: 'PATs auto-revoke when their owner is revoked.' A token minted before revokeUser fails verification with PatRevokedError (pinned) afterwards. revokeUser alone must be sufficient (see description: mechanism location is flagged as a text inconsistency).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "captures": {
+            "token": "token"
+          }
+        },
+        {
+          "op": "revoke_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_pat_token",
+          "input": {
+            "token": "{token}"
+          },
+          "expected": {
+            "error": "PatRevokedError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_pat.revoked_user_refused",
+      "description": "ADR 0016 \u00a7Constraints and ADR 0029: `createPat` for a revoked user raises `PreconditionError`.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "revoke_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "expected": {
+            "error": "PreconditionError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_pat.suspended_user_refused",
+      "description": "ADR 0029: `createPat` for a suspended user raises `PreconditionError`.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "expected": {
+            "error": "PreconditionError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_pat.reinstated_user_ok",
+      "description": "Known positive: after suspend then reinstate, `createPat` succeeds.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "reinstate_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_mfa.suspended_refused",
+      "description": "A suspended user's valid TOTP code is refused (`InvalidCredentialError`, conflated with proof failure; ADR 0029).",
+      "users": [],
+      "steps": [
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "enroll_totp_factor",
+          "input": {
+            "usr_id": "{usr_id}"
+          },
+          "captures": {
+            "mfa_id": "factor.id",
+            "secret": "secret"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "enroll_code": "code"
+          }
+        },
+        {
+          "op": "confirm_totp_factor",
+          "input": {
+            "mfa_id": "{mfa_id}",
+            "code": "{enroll_code}"
+          }
+        },
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:01:00Z"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "code1": "code"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code1}"
+            }
+          },
+          "expected": {
+            "error": "InvalidCredentialError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_mfa.reinstated_ok",
+      "description": "Known positive: after suspend then reinstate, a valid TOTP code verifies.",
+      "users": [],
+      "steps": [
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "enroll_totp_factor",
+          "input": {
+            "usr_id": "{usr_id}"
+          },
+          "captures": {
+            "mfa_id": "factor.id",
+            "secret": "secret"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "enroll_code": "code"
+          }
+        },
+        {
+          "op": "confirm_totp_factor",
+          "input": {
+            "mfa_id": "{mfa_id}",
+            "code": "{enroll_code}"
+          }
+        },
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:01:00Z"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "reinstate_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "code1": "code"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code1}"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
