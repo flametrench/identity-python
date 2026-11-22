@@ -334,6 +334,37 @@ def test_verify_password_checks_status_after_the_hash(
     assert calls == ["match"]
 
 
+def test_verify_mfa_totp_suspended_refused_and_consumes_nothing(
+    store: Any, clock: Clock
+) -> None:
+    usr_id, mfa_id, secret = _active_totp(store, clock)
+    clock.advance(60)
+    code = _code(secret, clock)
+    step_before = _last_step(store, mfa_id)
+    store.suspend_user(usr_id)
+    with pytest.raises(InvalidCredentialError) as suspended:
+        store.verify_mfa(usr_id, TotpProof(code=code))
+    assert type(suspended.value) is InvalidCredentialError
+    assert _last_step(store, mfa_id) == step_before
+    with pytest.raises(InvalidCredentialError) as bad:
+        store.verify_mfa(usr_id, TotpProof(code="000000" if code != "000000" else "111111"))
+    assert str(suspended.value) == str(bad.value)
+    store.reinstate_user(usr_id)
+    assert store.verify_mfa(usr_id, TotpProof(code=code)).mfa_id == mfa_id
+
+
+def test_verify_mfa_recovery_suspended_refused_and_consumes_nothing(store: Any) -> None:
+    user = store.create_user()
+    codes = store.enroll_recovery_factor(user.id).codes
+    store.suspend_user(user.id)
+    with pytest.raises(InvalidCredentialError) as exc:
+        store.verify_mfa(user.id, RecoveryProof(code=codes[0]))
+    assert type(exc.value) is InvalidCredentialError
+    assert _active_recovery(store, user.id)[0].remaining == len(codes)
+    store.reinstate_user(user.id)
+    assert store.verify_mfa(user.id, RecoveryProof(code=codes[0])).type == FactorType.RECOVERY
+
+
 # ─── Recovery re-enrollment (ADR 0008 §Verification flow) ───
 
 

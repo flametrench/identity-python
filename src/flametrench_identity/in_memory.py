@@ -1109,6 +1109,14 @@ class InMemoryIdentityStore:
             return self._verify_recovery(usr_id, proof.code)
         raise TypeError(f"Unknown proof type: {type(proof).__name__}")
 
+    def _refuse_mfa_unless_active(self, usr_id: str, message: str) -> None:
+        # ADR 0029: a non-active user's valid proof is refused with the
+        # same error and message as a failed proof, so status is no
+        # oracle. Called after the proof verifies and before anything is
+        # consumed, so a refusal changes nothing.
+        if self._require_user(usr_id).status != Status.ACTIVE:
+            raise InvalidCredentialError(message)
+
     def _verify_totp(self, usr_id: str, code: str) -> MfaVerifyResult:
         mfa_id = self._mfa_active_singleton.get(f"{usr_id}|totp")
         if mfa_id is None:
@@ -1123,6 +1131,7 @@ class InMemoryIdentityStore:
         last = self._mfa_totp_last_step.get(mfa_id)
         if last is not None and step <= last:
             raise ReplayedTotpError()
+        self._refuse_mfa_unless_active(usr_id, "TOTP code did not verify")
         self._mfa_totp_last_step[mfa_id] = step
         return MfaVerifyResult(
             mfa_id=mfa_id,
@@ -1159,6 +1168,7 @@ class InMemoryIdentityStore:
             client_data_json=proof.client_data_json,
             signature=proof.signature,
         )
+        self._refuse_mfa_unless_active(usr_id, "WebAuthn assertion did not verify")
         # Persist the advanced counter atomically with the verify.
         updated = WebAuthnFactor(
             id=factor.id,
@@ -1200,6 +1210,7 @@ class InMemoryIdentityStore:
                 matched_slot = i
         if matched_slot == -1:
             raise InvalidCredentialError("Recovery code did not verify")
+        self._refuse_mfa_unless_active(usr_id, "Recovery code did not verify")
         # Consume the matched slot.
         consumed[matched_slot] = True
         # Update the public RecoveryFactor's `remaining`.

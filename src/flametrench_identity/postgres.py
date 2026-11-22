@@ -140,6 +140,18 @@ def _to_bytes(value: Any) -> bytes:
     return bytes(value)
 
 
+def _refuse_mfa_unless_active(cur: Any, usr_uuid: Any, message: str) -> None:
+    # ADR 0029: a non-active user's valid proof is refused with the same
+    # error and message as a failed proof, so status is no oracle. Called
+    # inside the verify transaction after the consuming UPDATE, so the
+    # raise rolls back any step, counter or slot consumption. FOR SHARE
+    # holds the status until commit.
+    cur.execute("SELECT status FROM usr WHERE id = %s FOR SHARE", (str(usr_uuid),))
+    row = cur.fetchone()
+    if row is None or row[0] != Status.ACTIVE.value:
+        raise InvalidCredentialError(message)
+
+
 # ─── Row → entity mappers ───
 
 
@@ -1409,6 +1421,7 @@ class PostgresIdentityStore:
                     if still is None or still[0] != FactorStatus.ACTIVE.value:
                         raise InvalidCredentialError("No active TOTP factor for user")
                     raise ReplayedTotpError()
+                _refuse_mfa_unless_active(cur, row[1], "TOTP code did not verify")
         return MfaVerifyResult(
             mfa_id=_encode("mfa", str(row[0])),
             type=FactorType.TOTP,
@@ -1451,6 +1464,7 @@ class PostgresIdentityStore:
                     "UPDATE mfa SET webauthn_sign_count = %s WHERE id = %s",
                     (result.new_sign_count, row[0]),
                 )
+                _refuse_mfa_unless_active(cur, row[1], "WebAuthn assertion did not verify")
         return MfaVerifyResult(
             mfa_id=_encode("mfa", str(row[0])),
             type=FactorType.WEBAUTHN,
@@ -1493,6 +1507,7 @@ class PostgresIdentityStore:
                     "UPDATE mfa SET recovery_consumed = %s WHERE id = %s",
                     (consumed, row[0]),
                 )
+                _refuse_mfa_unless_active(cur, row[1], "Recovery code did not verify")
         return MfaVerifyResult(
             mfa_id=_encode("mfa", str(row[0])),
             type=FactorType.RECOVERY,
