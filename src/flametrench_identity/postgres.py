@@ -923,7 +923,10 @@ class PostgresIdentityStore:
             usr_uuid = _wire_to_uuid(usr_id)
             cred_uuid = _wire_to_uuid(cred_id)
             with conn.cursor() as cur:
-                cur.execute("SELECT status FROM usr WHERE id = %s", (usr_uuid,))
+                # FOR SHARE: a concurrent suspend_user/revoke_user either
+                # commits first (and is seen here) or waits for this
+                # session to commit and then revokes it in its cascade.
+                cur.execute("SELECT status FROM usr WHERE id = %s FOR SHARE", (usr_uuid,))
                 user_row = cur.fetchone()
                 if user_row is None:
                     raise NotFoundError(f"User {usr_id} not found")
@@ -1010,12 +1013,33 @@ class PostgresIdentityStore:
         )
         if self._now() > expires_at:
             raise SessionExpiredError("Session has expired")
+        # ADR 0029 backstop for a session that escaped the suspend/revoke
+        # cascade: conflated with any other invalid token.
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT status FROM usr WHERE id = %s", (row[1],))
+            usr_row = cur.fetchone()
+        if usr_row is None or usr_row[0] != Status.ACTIVE.value:
+            raise InvalidTokenError("Invalid token")
         return _row_to_session(row)
 
     def refresh_session(self, ses_id: str) -> SessionWithToken:
         with self._tx() as conn:
             uuid = _wire_to_uuid(ses_id)
             with conn.cursor() as cur:
+                # ADR 0029: no new session for a non-active user. usr is
+                # locked before ses, the same order as suspend_user and
+                # revoke_user, so the two cannot deadlock.
+                cur.execute("SELECT usr_id FROM ses WHERE id = %s", (uuid,))
+                owner = cur.fetchone()
+                if owner is None:
+                    raise NotFoundError(f"Session {ses_id} not found")
+                cur.execute("SELECT status FROM usr WHERE id = %s FOR SHARE", (owner[0],))
+                usr_row = cur.fetchone()
+                if usr_row is None or usr_row[0] != Status.ACTIVE.value:
+                    raise PreconditionError(
+                        "Cannot refresh session for a non-active user",
+                        reason="user_not_active",
+                    )
                 cur.execute(
                     f"SELECT {_SES_COLS} FROM ses WHERE id = %s FOR UPDATE",
                     (uuid,),

@@ -781,10 +781,20 @@ class InMemoryIdentityStore:
             raise SessionExpiredError("Session is revoked")
         if self._now() > session.expires_at:
             raise SessionExpiredError("Session has expired")
+        # ADR 0029 backstop for a session that escaped the suspend/revoke
+        # cascade: conflated with any other invalid token.
+        if self._require_user(session.usr_id).status != Status.ACTIVE:
+            raise InvalidTokenError()
         return session
 
     def refresh_session(self, ses_id: str) -> SessionWithToken:
         session = self._require_session(ses_id)
+        # ADR 0029: no new session for a non-active user.
+        if self._require_user(session.usr_id).status != Status.ACTIVE:
+            raise PreconditionError(
+                "Cannot refresh session for a non-active user",
+                reason="user_not_active",
+            )
         if session.revoked_at is not None:
             raise SessionExpiredError("Session is already revoked")
         if self._now() > session.expires_at:

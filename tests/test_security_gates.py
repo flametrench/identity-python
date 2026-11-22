@@ -28,9 +28,11 @@ from flametrench_identity import InMemoryIdentityStore
 from flametrench_identity.errors import (
     InvalidCredentialError,
     InvalidPatTokenError,
+    InvalidTokenError,
     PatRevokedError,
     PreconditionError,
     ReplayedTotpError,
+    SessionExpiredError,
 )
 from flametrench_identity.mfa import (
     FactorStatus,
@@ -332,6 +334,101 @@ def test_verify_password_checks_status_after_the_hash(
     with pytest.raises(InvalidCredentialError):
         store.verify_password("sus3@example.com", PASSWORD)
     assert calls == ["match"]
+
+
+def _session(store: Any, identifier: str) -> tuple[str, Any]:
+    user = store.create_user()
+    cred = store.create_password_credential(user.id, identifier, PASSWORD)
+    return user.id, store.create_session(user.id, cred.id, 3600)
+
+
+def _set_status_skipping_cascade(store: Any, usr_id: str, status: Status) -> None:
+    """Model a session that escaped the suspend/revoke cascade (ADR 0029
+    backstop): change only usr.status, leaving the user's sessions live."""
+    if isinstance(store, InMemoryIdentityStore):
+        store._users[usr_id] = store._users[usr_id].with_status(status, store._now())
+        return
+    with store._conn.cursor() as cur:
+        cur.execute(
+            "UPDATE usr SET status = %s WHERE id = %s",
+            (status.value, postgres_mod._wire_to_uuid(usr_id)),
+        )
+    store._conn.commit()
+
+
+def test_suspend_then_refresh_and_verify_refused(store: Any) -> None:
+    usr_id, issued = _session(store, "ses1@example.com")
+    store.suspend_user(usr_id)
+    with pytest.raises(PreconditionError) as exc:
+        store.refresh_session(issued.session.id)
+    assert exc.value.reason == "user_not_active"
+    # The suspend cascade revoked the session; the stores already differ in
+    # which refusal that yields (memory drops the token, Postgres keeps it).
+    with pytest.raises((InvalidTokenError, SessionExpiredError)):
+        store.verify_session_token(issued.token)
+
+
+@pytest.mark.parametrize("status", [Status.SUSPENDED, Status.REVOKED])
+def test_live_session_of_non_active_user_refused(store: Any, status: Status) -> None:
+    usr_id, issued = _session(store, f"ses-{status.value}@example.com")
+    _set_status_skipping_cascade(store, usr_id, status)
+    with pytest.raises(InvalidTokenError) as verify:
+        store.verify_session_token(issued.token)
+    assert type(verify.value) is InvalidTokenError
+    with pytest.raises(PreconditionError) as refresh:
+        store.refresh_session(issued.session.id)
+    assert refresh.value.reason == "user_not_active"
+    # Refusal changed nothing: the session is still live and unrotated.
+    assert store.get_session(issued.session.id).revoked_at is None
+
+
+def test_live_session_works_again_after_reinstate(store: Any) -> None:
+    usr_id, issued = _session(store, "ses2@example.com")
+    _set_status_skipping_cascade(store, usr_id, Status.SUSPENDED)
+    with pytest.raises(InvalidTokenError):
+        store.verify_session_token(issued.token)
+    store.reinstate_user(usr_id)
+    assert store.verify_session_token(issued.token).id == issued.session.id
+    assert store.refresh_session(issued.session.id).session.usr_id == usr_id
+
+
+def test_postgres_create_session_waits_for_concurrent_suspend(
+    pg_conn: Any, clock: Clock
+) -> None:
+    """create_session reads usr FOR SHARE, so it cannot commit a session
+    on the strength of a status read taken before a concurrent suspend."""
+    store = postgres_mod.PostgresIdentityStore(pg_conn, clock=clock)
+    user = store.create_user()
+    cred = store.create_password_credential(user.id, "race@example.com", PASSWORD)
+    pg_conn.commit()
+    usr_uuid = postgres_mod._wire_to_uuid(user.id)
+    suspender = _connect()
+    outcome: dict[str, Any] = {}
+    try:
+        with suspender.cursor() as cur:
+            cur.execute("SET lock_timeout = '5s'")
+            cur.execute("SELECT 1 FROM usr WHERE id = %s FOR UPDATE", (usr_uuid,))
+
+        def create() -> None:
+            try:
+                outcome["result"] = store.create_session(user.id, cred.id, 3600)
+            except Exception as exc:
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=create)
+        worker.start()
+        worker.join(timeout=1)
+        assert worker.is_alive(), "create_session did not wait for the usr row lock"
+        with suspender.cursor() as cur:
+            cur.execute("UPDATE usr SET status = 'suspended' WHERE id = %s", (usr_uuid,))
+        suspender.commit()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+    finally:
+        suspender.close()
+    assert "result" not in outcome
+    assert isinstance(outcome["error"], PreconditionError)
+    assert outcome["error"].reason == "user_not_active"
 
 
 def test_verify_mfa_totp_suspended_refused_and_consumes_nothing(
