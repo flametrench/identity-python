@@ -147,7 +147,7 @@ def test_totp_match_step_returns_matched_window() -> None:
 
 def test_replayed_totp_error_is_an_invalid_credential() -> None:
     assert issubclass(ReplayedTotpError, InvalidCredentialError)
-    assert ReplayedTotpError().code == "replayed_totp"
+    assert ReplayedTotpError().code == "unauthorized.totp_replayed"
 
 
 def test_confirm_records_step_and_its_code_cannot_verify(store: Any, clock: Clock) -> None:
@@ -430,6 +430,17 @@ def test_create_pat_revoked_user_refused_and_creates_nothing(
 ) -> None:
     user = mem.create_user()
     mem.revoke_user(user.id)
+    with pytest.raises(PreconditionError) as exc:
+        mem.create_pat(user.id, "ci", [])
+    assert exc.value.reason == "user_not_active"
+    assert mem.list_pats_for_user(user.id).data == []
+
+
+def test_create_pat_suspended_user_refused_and_creates_nothing(
+    mem: InMemoryIdentityStore,
+) -> None:
+    user = mem.create_user()
+    mem.suspend_user(user.id)
     with pytest.raises(PreconditionError) as exc:
         mem.create_pat(user.id, "ci", [])
     assert exc.value.reason == "user_not_active"

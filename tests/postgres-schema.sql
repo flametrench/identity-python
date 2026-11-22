@@ -55,7 +55,9 @@ CREATE TABLE usr (
     id            UUID PRIMARY KEY,
     status        TEXT NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active', 'suspended', 'revoked')),
-    -- ADR 0014 (v0.2) — optional human-meaningful render string.
+    -- Optional human-meaningful render string (ADR 0014, v0.2). Spec is
+    -- permissive: no length cap, no uniqueness, no normalization. Adopters
+    -- that need stricter rules apply them at the application layer.
     display_name  TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()

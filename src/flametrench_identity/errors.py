@@ -53,7 +53,7 @@ class ReplayedTotpError(InvalidCredentialError):
 
     def __init__(self, message: str = "TOTP code was already used") -> None:
         super().__init__(message)
-        self.code = "replayed_totp"
+        self.code = "unauthorized.totp_replayed"
 
 
 class InvalidTokenError(IdentityError):

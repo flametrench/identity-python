@@ -1309,10 +1309,11 @@ class InMemoryIdentityStore:
         *,
         expires_at: datetime | None = None,
     ) -> CreatePatResult:
-        # ADR 0016 §Constraints: usr_id MUST refer to a non-revoked usr.
-        if self._require_user(usr_id).status == Status.REVOKED:
+        # ADR 0029: no PAT is issued to a non-active (suspended or revoked) usr.
+        user = self._require_user(usr_id)
+        if user.status != Status.ACTIVE:
             raise PreconditionError(
-                f"Cannot create PAT for revoked user {usr_id}",
+                f"Cannot create PAT for {user.status.value} user {usr_id}",
                 reason="user_not_active",
             )
         name_len = len(name)
