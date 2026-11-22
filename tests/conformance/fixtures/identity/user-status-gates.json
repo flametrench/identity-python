@@ -1,0 +1,375 @@
+{
+  "$schema": "../../fixture.schema.json",
+  "spec_version": "0.3.0",
+  "capability": "identity",
+  "operation": "verify_password",
+  "conformance_level": "MUST",
+  "spec_section": "docs/identity.md#lifecycle",
+  "description": "User status is honoured at authentication and issuance time. Asserts ONLY accepted text: `docs/identity.md` \u00a7Lifecycle \u2014 a `suspended` user 'cannot authenticate' (and a `revoked` user is terminal); ADR 0016 \u00a7Constraints \u2014 `createPat` requires a non-revoked user, and PATs auto-revoke when their owner is revoked; `docs/identity.md` \u00a7PAT lifecycle \u2014 revoked tokens fail `verifyPatToken` with `PatRevokedError`. Every refusal arm is paired with a reinstate-and-succeed arm (the known positive: suspension is reversible, so the gate must be evaluated at verify/issue time, not by cascade). NOT asserted here (needs accepted text first, pending a spec clarification): refusing `createPat`/`createShare` for a SUSPENDED user. ERROR-NAME PROVENANCE: `PatRevokedError` is pinned by accepted text. `InvalidCredentialError` for `verifyPassword` follows `docs/identity.md` \u00a7Legacy migration step 2 (the named verifyPassword failure) and avoids a user-status oracle. `PreconditionError` for issuing to a non-active user (`createSession`, `createPat`) follows existing SDK precedent (Node createSession, PHP createPat) \u2014 PROVISIONAL, to be pinned by a pending spec clarification. The error for verifying a SUSPENDED owner's PAT (`InvalidPatTokenError`, conflated so status is not disclosed) is likewise PROVISIONAL. SCOPE (interpretation of accepted text): refusing `createSession` for a suspended user is IN scope \u2014 identity.md \u00a7Lifecycle requires a suspended user's active sessions be terminated on the transition and says the user 'cannot authenticate'; issuing a new session is the authenticated outcome, so none may be issued while suspended. This is distinct from the excluded suspended-user issuance of PATs/shares, which the accepted text does not cover. PAT CASCADE: the vector asserts ADR 0016 \u00a7Constraints' behaviour ('PATs auto-revoke when their owner is revoked'); the text is inconsistent about WHERE the cascade lives (0016 names `cascadeRevokeSubject`, which authorization.md defines as a tuple delete; identity.md \u00a7Operations lists revokeUser's cascades without PATs) \u2014 noted for reconciliation. Harness op `revoke_user` MUST invoke only the SDK's user-revocation operation (`revokeUser`), with no extra cascade call, so the vector tests that revoking a user is sufficient. Harness op `reinstate_user` maps to `reinstateUser`.",
+  "tests": [
+    {
+      "id": "user_status.verify_password.suspended_refused",
+      "description": "A suspended user's correct password is refused.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "sus@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_password",
+          "input": {
+            "identifier": "sus@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "expected": {
+            "error": "InvalidCredentialError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_password.reinstated_ok",
+      "description": "Known positive: suspend then reinstate; the correct password verifies.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "back@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "reinstate_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_password",
+          "input": {
+            "identifier": "back@example.com",
+            "password": "long-enough-password-for-floor"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_password.revoked_refused",
+      "description": "A revoked user's correct password is refused.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "gone@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "revoke_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_password",
+          "input": {
+            "identifier": "gone@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "expected": {
+            "error": "InvalidCredentialError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_session.suspended_refused",
+      "description": "No session may be issued to a suspended user (provisional error name).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "s2@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id",
+            "cred_id": "credential.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_session",
+          "input": {
+            "usr_id": "{usr_id}",
+            "cred_id": "{cred_id}",
+            "ttl_seconds": 3600
+          },
+          "expected": {
+            "error": "PreconditionError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_session.reinstated_ok",
+      "description": "Known positive: after reinstate a session is issued.",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "s3@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id",
+            "cred_id": "credential.id"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "reinstate_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_session",
+          "input": {
+            "usr_id": "{usr_id}",
+            "cred_id": "{cred_id}",
+            "ttl_seconds": 3600
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_session.revoked_refused",
+      "description": "No session may be issued to a revoked user (provisional error name).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user_with_password_credential",
+          "input": {
+            "identifier": "s4@example.com",
+            "password": "long-enough-password-for-floor"
+          },
+          "captures": {
+            "usr_id": "user.id",
+            "cred_id": "credential.id"
+          }
+        },
+        {
+          "op": "revoke_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_session",
+          "input": {
+            "usr_id": "{usr_id}",
+            "cred_id": "{cred_id}",
+            "ttl_seconds": 3600
+          },
+          "expected": {
+            "error": "PreconditionError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_pat.suspended_owner_refused",
+      "description": "A PAT whose owner is suspended does not authenticate (identity.md: suspended user cannot authenticate). Error name PROVISIONAL (conflated InvalidPatTokenError).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "captures": {
+            "token": "token"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_pat_token",
+          "input": {
+            "token": "{token}"
+          },
+          "expected": {
+            "error": "InvalidPatTokenError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.verify_pat.reinstated_owner_ok",
+      "description": "Known positive: suspension is reversible \u2014 after reinstate the SAME token verifies (the gate is evaluated at verify time, not by revoking the PAT).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "captures": {
+            "token": "token"
+          }
+        },
+        {
+          "op": "suspend_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "reinstate_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_pat_token",
+          "input": {
+            "token": "{token}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.revoke_user.cascades_to_pats",
+      "description": "ADR 0016 \u00a7Constraints: 'PATs auto-revoke when their owner is revoked.' A token minted before revokeUser fails verification with PatRevokedError (pinned) afterwards. revokeUser alone must be sufficient (see description: mechanism location is flagged as a text inconsistency).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "captures": {
+            "token": "token"
+          }
+        },
+        {
+          "op": "revoke_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "verify_pat_token",
+          "input": {
+            "token": "{token}"
+          },
+          "expected": {
+            "error": "PatRevokedError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "user_status.create_pat.revoked_user_refused",
+      "description": "ADR 0016 \u00a7Constraints: `usr_id` MUST refer to a non-revoked usr. Error name PROVISIONAL (PreconditionError, PHP precedent).",
+      "users": [],
+      "steps": [
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "revoke_user",
+          "input": {
+            "usr_id": "{usr_id}"
+          }
+        },
+        {
+          "op": "create_pat",
+          "input": {
+            "usr_id": "{usr_id}",
+            "name": "ci",
+            "scope": []
+          },
+          "expected": {
+            "error": "PreconditionError"
+          }
+        }
+      ]
+    }
+  ]
+}

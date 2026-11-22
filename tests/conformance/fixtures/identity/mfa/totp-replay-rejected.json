@@ -1,0 +1,300 @@
+{
+  "$schema": "../../../fixture.schema.json",
+  "spec_version": "0.2.0",
+  "capability": "identity",
+  "operation": "verify_mfa",
+  "conformance_level": "MUST",
+  "spec_section": "decisions/0008-mfa.md#mfa-verification",
+  "description": "TOTP replay protection (ADR 0008 \u00a7verifyMfa: 'rejects code reuse via a per-(usr_id, code, time-step) deduplication index'; \u00a7Conformance names this fixture and `ReplayedTotpError`). A TOTP code accepted once MUST be rejected with `ReplayedTotpError` if presented again for the same user within its window. Asserts ONLY accepted ADR 0008 text: same code, same user, same time-step, second use rejected. It does NOT assert the stricter 'an older step is rejected after a newer one was accepted' rule \u2014 that is a stricter rule pending as a spec change. Harness pseudo-ops (not SDK surface): `set_clock` pins the store's clock to `now` (ISO-8601 UTC) for all subsequent steps; `compute_totp_code` returns the RFC 6238 code for `secret` (the base32 secret captured from enrollment) at the current pinned clock with the factor's algorithm/digits/period (SHA1/6/30 defaults).",
+  "tests": [
+    {
+      "id": "totp_replay.same_code_same_step.second_use_rejected",
+      "description": "Enroll + confirm a TOTP factor, verify a code successfully, then present the identical code again in the same time-step: the second verify MUST raise ReplayedTotpError.",
+      "users": [],
+      "steps": [
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "enroll_totp_factor",
+          "input": {
+            "usr_id": "{usr_id}"
+          },
+          "captures": {
+            "mfa_id": "factor.id",
+            "secret": "secret"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "enroll_code": "code"
+          }
+        },
+        {
+          "op": "confirm_totp_factor",
+          "input": {
+            "mfa_id": "{mfa_id}",
+            "code": "{enroll_code}"
+          }
+        },
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:01:00Z"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "code": "code"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code}"
+            }
+          },
+          "expected": {
+            "error": "ReplayedTotpError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "totp_replay.consumed_code_replayed_in_next_step_rejected",
+      "description": "A consumed code stays consumed across the drift window: verify code(N) at step N, verify code(N+1) at step N+1, then present code(N) again at step N+1 (still inside the \u00b11 window) \u2014 it MUST raise ReplayedTotpError. This is ADR 0008's per-(usr_id, code, time-step) dedup, not a stricter pending rule concerning never-used older codes.",
+      "users": [],
+      "steps": [
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "enroll_totp_factor",
+          "input": {
+            "usr_id": "{usr_id}"
+          },
+          "captures": {
+            "mfa_id": "factor.id",
+            "secret": "secret"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "enroll_code": "code"
+          }
+        },
+        {
+          "op": "confirm_totp_factor",
+          "input": {
+            "mfa_id": "{mfa_id}",
+            "code": "{enroll_code}"
+          }
+        },
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:01:00Z"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "code_n": "code"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code_n}"
+            }
+          }
+        },
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:01:30Z"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "code_n1": "code"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code_n1}"
+            }
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code_n}"
+            }
+          },
+          "expected": {
+            "error": "ReplayedTotpError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "totp_replay.next_step_code_accepted",
+      "description": "Known positive: after a code is consumed, the code for the NEXT time-step is accepted (replay protection does not lock the factor).",
+      "users": [],
+      "steps": [
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:00:00Z"
+          }
+        },
+        {
+          "op": "create_user",
+          "input": {},
+          "captures": {
+            "usr_id": "user.id"
+          }
+        },
+        {
+          "op": "enroll_totp_factor",
+          "input": {
+            "usr_id": "{usr_id}"
+          },
+          "captures": {
+            "mfa_id": "factor.id",
+            "secret": "secret"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "enroll_code": "code"
+          }
+        },
+        {
+          "op": "confirm_totp_factor",
+          "input": {
+            "mfa_id": "{mfa_id}",
+            "code": "{enroll_code}"
+          }
+        },
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:01:00Z"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "code1": "code"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code1}"
+            }
+          }
+        },
+        {
+          "op": "set_clock",
+          "input": {
+            "now": "2026-01-01T00:01:30Z"
+          }
+        },
+        {
+          "op": "compute_totp_code",
+          "input": {
+            "secret": "{secret}"
+          },
+          "captures": {
+            "code2": "code"
+          }
+        },
+        {
+          "op": "verify_mfa",
+          "input": {
+            "usr_id": "{usr_id}",
+            "proof": {
+              "type": "totp",
+              "code": "{code2}"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
